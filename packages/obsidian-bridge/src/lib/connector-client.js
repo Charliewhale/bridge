@@ -155,6 +155,8 @@ function createConnectorClient(options = {}) {
     // path 传 null = 明确告诉连接器「现在没有打开的笔记」，别让旧的那篇一直挂着。
     pushActiveNote: (payload) => request('/active-note', { method: 'POST', body: payload }),
     clearActiveNote: () => request('/active-note', { method: 'POST', body: { path: null } }),
+    // 库根目录：连接器靠它决定会话转录写到哪儿（它不知道这个库在磁盘上叫什么）
+    pushVault: (vaultPath) => request('/vault', { method: 'POST', body: { path: vaultPath || '' } }),
     activeNote: () => request('/active-note', { method: 'GET' }),
 
     async subscribe(sessionId, onEvent, signal) {

@@ -9,6 +9,8 @@ import crypto from 'node:crypto';
 import { startConnector } from './core/server.mjs';
 import { renderInjection } from './core/injection.mjs';
 import { createStateStore } from './core/state.mjs';
+import { createTranscriptStore } from './core/transcript-store.mjs';
+import { createTranscriptService } from './core/transcript-service.mjs';
 
 const INJECTION_FILE = path.join(os.homedir(), '.dsh-bridge', 'injections.json');
 
@@ -68,6 +70,16 @@ export async function apply(ctx, config = {}) {
   };
 
 
+  // 转录：会话里发生的事 → 库里 记录/日志/agent.dsh-raw/<日期>/会话-<短id>.md
+  // 库根目录由 Obsidian 插件推上来（/vault）；没推就什么都不写。
+  const transcriptStore = createTranscriptStore({ agent: 'agent.dsh' });
+  const transcriptService = createTranscriptService({
+    store: transcriptStore,
+    sessionsRoot: path.join(os.homedir(), '.dsh', 'sessions'),
+    stateFile: path.join(os.homedir(), '.dsh-bridge', 'transcripts.json'),
+    log: (m) => ctx.logger?.info?.('[bridge-connector] ' + m),
+  });
+
   let server = null;
   let lastError = null;
   for (let offset = 0; offset < 5; offset += 1) {
@@ -81,6 +93,7 @@ export async function apply(ctx, config = {}) {
         injectionTtlMs: Number(config.injectionTtlMs) || undefined,
         injectionFile: INJECTION_FILE,
         injectionState,
+        transcriptStore,
         workspaceRegistry,
       });
       break;
@@ -125,7 +138,19 @@ export async function apply(ctx, config = {}) {
     } catch {
       /* 监听器绝不打断会话 */
     }
+    try {
+      // 转录是"顺手记"，任何错误都不许影响会话
+      transcriptService.noteEvent(session, event);
+    } catch (error) {
+      ctx.logger?.warn?.('[bridge-connector] 转录失败：' + String((error && error.message) || error));
+    }
   });
+
+  try {
+    transcriptService.start();
+  } catch (error) {
+    ctx.logger?.warn?.('[bridge-connector] 转录启动失败：' + String((error && error.message) || error));
+  }
 
   writeInfo({
     service: 'dsh-bridge-connector',

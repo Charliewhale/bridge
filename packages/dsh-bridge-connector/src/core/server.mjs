@@ -161,6 +161,7 @@ export function startConnector(options) {
     workspaceRegistry = null,
     injectionState = { on: false },
     obsidianProbe = null,
+    transcriptStore = null,
   } = options;
 
 
@@ -687,6 +688,20 @@ export function startConnector(options) {
       return;
     }
 
+    // 库里落到哪儿：Obsidian 插件启动时把库根目录推上来，转录按它写
+    if (req.method === 'POST' && path === '/vault') {
+      const payload = await readJsonBody(req, res);
+      if (!payload) return;
+      const root = String(payload.path || '').trim();
+      if (transcriptStore) transcriptStore.setRoot(root);
+      json(res, 200, { ok: true, data: { root: transcriptStore ? transcriptStore.root : '' } });
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/vault') {
+      json(res, 200, { ok: true, data: { root: transcriptStore ? transcriptStore.root : '' } });
+      return;
+    }
     if (req.method === 'GET' && path === '/events') {
       const sessionId = String(url.searchParams.get('sessionId') || '').trim();
       if (!sessionId) {
