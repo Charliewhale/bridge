@@ -57,9 +57,36 @@ export function createTranscriptService({
     return Boolean(store && store.root);
   }
 
+  /** 工具调用 id → 工具名。工具结果那条本身不带名字，只能靠调用时记下来。 */
+  const callNames = new Map();
+  const CALL_MAP_MAX = 500;
+
+  function rememberCalls(ev) {
+    if (!ev || ev.role !== 'assistant' || !Array.isArray(ev.calls)) return;
+    for (const c of ev.calls) {
+      if (!c || !c.id) continue;
+      callNames.delete(c.id);
+      callNames.set(c.id, c.name);
+      if (callNames.size > CALL_MAP_MAX) {
+        const oldest = callNames.keys().next().value;
+        if (oldest !== undefined) callNames.delete(oldest);
+      }
+    }
+  }
+
+  function withToolName(ev) {
+    if (!ev || ev.role !== 'tool') return ev;
+    const name = callNames.get(ev.toolOf);
+    return name ? { ...ev, tool: name } : ev;
+  }
+
   function writeEvents(sessionId, events, cwd) {
     if (!events.length) return 0;
-    const r = store.appendEvents({ sessionId, cwd, events });
+    const ready = events.map((ev) => {
+      rememberCalls(ev);
+      return withToolName(ev);
+    });
+    const r = store.appendEvents({ sessionId, cwd, events: ready });
     return r.written;
   }
 

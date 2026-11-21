@@ -109,6 +109,29 @@ test('backfillRecent：路径到了之后把这段时间攒的补进来', () => 
   const out = path.join(vault, '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-late00002.md');
   assert.match(fs.readFileSync(out, 'utf8'), /第1句/);
 });
+
+test('工具结果跟名字对得上：结果那条自己不带工具名，靠调用时记的 id', () => {
+  const { svc, vault } = rig();
+  svc.start();
+  const session = { id: 'session-tool00001', cwd: 'D:\\RAG' };
+  const t0 = iso('2026-11-20T15:00:00+08:00');
+  svc.noteEvent(session, {
+    type: 'assistant/message', seq: 1, time: t0,
+    data: { message: { content: [
+      { type: 'text', text: '我看看' },
+      { type: 'tool-call', id: 'call_x1', name: 'read', arguments: '{"path":"a.md"}' },
+    ] } },
+  });
+  svc.noteEvent(session, {
+    type: 'tool/result', seq: 2, time: t0 + 1000,
+    data: { message: { content: [{ type: 'tool-result', toolCallId: 'call_x1', isError: false, content: [{ type: 'text', text: '文件内容' }] }] } },
+  });
+  const file = path.join(vault, '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-tool00001.md');
+  const text = fs.readFileSync(file, 'utf8');
+  assert.match(text, /· 工具 · read · 成功（4 字）/);
+  assert.match(text, /```text\n文件内容\n```/);
+  assert.equal(/path/.test(text), false, '参数不许漏进来');
+});
 test('没起服务就不收事件（避免启动瞬间的心跳混进来）', () => {
   const { svc } = rig();
   assert.equal(svc.noteEvent({ id: 'session-x1', cwd: '' }, human(1, Date.now())), false);

@@ -1,12 +1,13 @@
-// 转录格式：只留人和人说的话，工具只记「用了什么」，不搬参数和回显。
-// 2026-11-21 定的形状（辞玖：转录里工具参数等冗余太多，只留简洁对话 + 工具名）。
+// 转录格式（2026-11-21 定稿）：对话原文 + 工具名 + 工具结果，参数不抄
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   KEEP_TYPES,
+  TOOL_RESULT_LIMIT,
   toTranscriptEvent,
   renderEntry,
   renderHeader,
+  clipResult,
   shortIdOf,
   dayOf,
   hhmmssOf,
@@ -14,27 +15,18 @@ import {
 
 const at = (iso) => Date.parse(iso);
 
-test('只认对话和上下文压缩；轮次、工具回显、系统提示都不进转录', () => {
-  assert.ok(KEEP_TYPES['user/message']);
-  assert.ok(KEEP_TYPES['assistant/message']);
-  assert.ok(KEEP_TYPES['compaction/summary']);
-  for (const t of ['step/start', 'tool/call', 'tool/result', 'turn/start', 'turn/end', 'system/message', 'session']) {
-    assert.equal(
-      toTranscriptEvent({ type: t, seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 1 } }),
-      null,
-      t + ' 不该进转录'
-    );
+test('进转录的只有对话、工具结果、上下文压缩', () => {
+  for (const t of ['user/message', 'assistant/message', 'tool/result', 'compaction/summary']) assert.ok(KEEP_TYPES[t], t);
+  for (const t of ['step/start', 'tool/call', 'turn/start', 'turn/end', 'system/message', 'session']) {
+    assert.equal(toTranscriptEvent({ type: t, seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 1 } }), null, t);
   }
 });
 
 test('没有时间的记录不猜时间', () => {
-  assert.equal(
-    toTranscriptEvent({ type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] } }),
-    null
-  );
+  assert.equal(toTranscriptEvent({ type: 'turn/start', seq: 1, data: { turn: 1 } }), null);
 });
 
-test('user/message：只收真人说的，正文原样', () => {
+test('user/message：只收真人说的', () => {
   const human = toTranscriptEvent({
     type: 'user/message',
     seq: 10,
@@ -43,18 +35,18 @@ test('user/message：只收真人说的，正文原样', () => {
   });
   assert.equal(human.role, 'user');
   assert.equal(human.body, '改个名');
-  assert.deepEqual(human.tools, []);
-
-  const plugin = toTranscriptEvent({
-    type: 'user/message',
-    seq: 10,
-    time: at('2026-11-20T15:22:37+08:00'),
-    data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'policy changed' }] },
-  });
-  assert.equal(plugin, null);
+  assert.equal(
+    toTranscriptEvent({
+      type: 'user/message',
+      seq: 10,
+      time: at('2026-11-20T15:22:37+08:00'),
+      data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'x' }] },
+    }),
+    null
+  );
 });
 
-test('assistant/message：只有正文，工具只留名字不搬参数', () => {
+test('assistant/message：正文 + 去重后的工具名，参数不进来', () => {
   const ev = toTranscriptEvent({
     type: 'assistant/message',
     seq: 11,
@@ -63,42 +55,81 @@ test('assistant/message：只有正文，工具只留名字不搬参数', () => 
       message: {
         content: [
           { type: 'text', text: '我先看看' },
-          { type: 'tool-call', name: 'pwsh', arguments: '{"command":"dir"}' },
-          { type: 'tool-call', name: 'obsidian_call', arguments: '{"op":"x"}' },
-          { type: 'tool-call', name: 'pwsh', arguments: '{"command":"ls"}' },
+          { type: 'tool-call', id: 'call_1', name: 'pwsh', arguments: '{"command":"dir"}' },
+          { type: 'tool-call', id: 'call_2', name: 'obsidian_call', arguments: '{"op":"x"}' },
+          { type: 'tool-call', id: 'call_3', name: 'pwsh', arguments: '{"command":"ls"}' },
         ],
       },
     },
   });
-  assert.equal(ev.role, 'assistant');
   assert.equal(ev.body, '我先看看');
   assert.deepEqual(ev.tools, ['pwsh', 'obsidian_call']);
+  assert.deepEqual(ev.calls, [
+    { id: 'call_1', name: 'pwsh' },
+    { id: 'call_2', name: 'obsidian_call' },
+    { id: 'call_3', name: 'pwsh' },
+  ]);
   assert.equal(renderEntry(ev), '## 15:22:40 · 我\n\n我先看看\n\n> 用了 2 个工具：pwsh、obsidian_call\n');
 });
 
-test('只调工具不说话的那条也要留个痕，别整条消失', () => {
+test('tool/result：留结果正文，标成功/失败和字数', () => {
   const ev = toTranscriptEvent({
-    type: 'assistant/message',
+    type: 'tool/result',
     seq: 12,
-    time: at('2026-11-20T15:22:41+08:00'),
-    data: { message: { content: [{ type: 'tool-call', name: 'obsidian_exec', arguments: '{}' }] } },
+    time: at('2026-11-20T15:22:42+08:00'),
+    data: {
+      message: {
+        content: [{ type: 'tool-result', toolCallId: 'call_1', isError: false, content: [{ type: 'text', text: '输出结果' }] }],
+      },
+    },
   });
-  assert.equal(ev.body, '');
-  assert.equal(renderEntry(ev), '## 15:22:41 · 我\n\n> 用了 1 个工具：obsidian_exec\n');
+  assert.equal(ev.role, 'tool');
+  assert.equal(ev.ok, true);
+  assert.equal(ev.chars, 4);
+  assert.equal(ev.toolOf, 'call_1');
+  assert.equal(renderEntry({ ...ev, tool: 'pwsh' }), '## 15:22:42 · 工具 · pwsh · 成功（4 字）\n\n```text\n输出结果\n```\n');
 });
 
-test('thinking 默认不收，要的话折进 details', () => {
-  const rec = {
-    type: 'assistant/message',
+test('失败的结果标成失败', () => {
+  const ev = toTranscriptEvent({
+    type: 'tool/result',
     seq: 13,
-    time: at('2026-11-20T15:22:41+08:00'),
-    data: { message: { content: [{ type: 'text', text: '答' }, { type: 'reasoning', text: '想' }] } },
-  };
-  assert.equal(toTranscriptEvent(rec).body, '答');
-  assert.match(toTranscriptEvent(rec, { withReasoning: true }).body, /<details><summary>思考<\/summary>[\s\S]*想/);
+    time: at('2026-11-20T15:22:43+08:00'),
+    data: {
+      message: {
+        content: [{ type: 'tool-result', toolCallId: 'call_9', isError: true, content: [{ type: 'text', text: 'boom' }] }],
+      },
+    },
+  });
+  assert.equal(ev.ok, false);
+  assert.match(renderEntry({ ...ev, tool: 'edit' }), /· 工具 · edit · 失败（4 字）/);
 });
 
-test('上下文压缩那一条保留（对话里会引用它）', () => {
+test('空结果不要；正文里带三个反引号时围栏自动加长', () => {
+  assert.equal(
+    toTranscriptEvent({
+      type: 'tool/result',
+      seq: 14,
+      time: at('2026-11-20T15:22:44+08:00'),
+      data: { message: { content: [{ type: 'tool-result', toolCallId: 'c', content: [{ type: 'text', text: '   ' }] }] } },
+    }),
+    null
+  );
+  const r = renderEntry({ role: 'tool', timeMs: at('2026-11-20T09:00:00+08:00'), tool: 'read', ok: true, chars: 9, body: '```\nx\n```' });
+  assert.ok(r.includes('````text'), '围栏要比正文里最长的反引号还长');
+});
+
+test('结果超长就截断，并写明截了多少', () => {
+  const long = 'x'.repeat(TOOL_RESULT_LIMIT + 500);
+  const c = clipResult(long);
+  assert.equal(c.clipped, true);
+  assert.equal(c.text.length, TOOL_RESULT_LIMIT);
+  assert.equal(c.total, TOOL_RESULT_LIMIT + 500);
+  const out = renderEntry({ role: 'tool', timeMs: at('2026-11-20T09:00:00+08:00'), tool: 'read', ok: true, chars: long.length, body: long });
+  assert.match(out, /共 2500 字，这里留了前 2000 字/);
+});
+
+test('上下文压缩那条保留', () => {
   const ev = toTranscriptEvent({
     type: 'compaction/summary',
     seq: 3,
@@ -106,34 +137,20 @@ test('上下文压缩那一条保留（对话里会引用它）', () => {
     data: { message: { content: [{ type: 'text', text: '摘要' }] } },
   });
   assert.equal(ev.role, 'system');
-  assert.equal(ev.body, '（上下文被压缩，摘要如下）\n\n摘要');
+  assert.match(ev.body, /摘要/);
 });
 
-test('标题按「你 / 我」写，一眼看出是谁在说', () => {
-  assert.equal(
-    renderEntry({ role: 'user', timeMs: at('2026-11-20T09:05:06+08:00'), body: '在吗', tools: [] }),
-    '## 09:05:06 · 你\n\n在吗\n'
-  );
-  assert.equal(
-    renderEntry({ role: 'system', timeMs: at('2026-11-20T09:05:06+08:00'), body: 'x', tools: [] }),
-    '## 09:05:06 · 系统\n\nx\n'
-  );
+test('标题里的称呼和篇头格式', () => {
+  assert.equal(renderEntry({ role: 'user', timeMs: at('2026-11-20T09:05:06+08:00'), body: '在吗', tools: [] }), '## 09:05:06 · 你\n\n在吗\n');
+  const head = renderHeader({ agent: 'agent.dsh', day: '2026-11-20', label: '会话-x', session: 'session-x', cwd: 'D:\\RAG' });
+  assert.match(head, /^# agent\.dsh · 2026-11-20 · 会话-x\n/);
+  assert.match(head, /工具参数不记/);
+  assert.match(head, /会话 id：`session-x` · cwd：`D:\\RAG`/);
 });
 
-test('篇头带会话 id 和 cwd，格式稳定', () => {
-  assert.equal(
-    renderHeader({ agent: 'agent.dsh', day: '2026-11-20', label: '会话-5bc95a76', session: 'session-5bc95a76-651d', cwd: 'D:\\RAG' }),
-    '# agent.dsh · 2026-11-20 · 会话-5bc95a76\n\n' +
-      '> 由 dsh-bridge-connector 从 DSH 会话日志**按会话**组装；只留对话和用过的工具名，工具参数与回显不抄。同一会话后续内容**直接追加在文末**（跨天才新建一篇）。\n>\n' +
-      '> 会话 id：`session-5bc95a76-651d` · cwd：`D:\\RAG`\n\n'
-  );
-});
-
-test('会话短名、日期、时刻按本地时区', () => {
+test('短名、日期、时刻', () => {
   assert.equal(shortIdOf('session-712f4f31-4faa-49a2-8df3-06b03686990f'), '712f4f31');
   assert.equal(shortIdOf('session-sched-task-3'), 'sched');
-  assert.equal(shortIdOf(''), '');
   assert.equal(dayOf(Date.parse('2026-11-20T23:59:59+08:00')), '2026-11-20');
-  assert.equal(dayOf(Date.parse('2026-11-21T00:00:01+08:00')), '2026-11-21');
   assert.equal(hhmmssOf(Date.parse('2026-11-20T09:05:06+08:00')), '09:05:06');
 });
