@@ -8,11 +8,27 @@ import { dayOf, renderEntry, renderHeader, shortIdOf } from './transcript-format
 
 export const TRANSCRIPT_DIR = ['记录', '日志'];
 
-export function createTranscriptStore({ root = '', agent = 'agent.dsh' } = {}) {
+export function createTranscriptStore({ root = '', agent = 'agent.dsh', stateFile = null } = {}) {
   let vaultRoot = String(root || '');
+  if (!vaultRoot && stateFile) {
+    // DSH 重启后插件不一定会马上把库路径再推一遍，所以这里记一份：上次落在哪，这次还落哪
+    try {
+      const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      if (saved && typeof saved.root === 'string') vaultRoot = saved.root;
+    } catch {
+      /* 没有记录就等插件推 */
+    }
+  }
 
   function setRoot(next) {
     vaultRoot = String(next || '');
+    if (!stateFile) return;
+    try {
+      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+      fs.writeFileSync(stateFile, JSON.stringify({ root: vaultRoot }, null, 2), 'utf8');
+    } catch {
+      /* 记不住也不影响本次写入 */
+    }
   }
 
   function baseDir() {

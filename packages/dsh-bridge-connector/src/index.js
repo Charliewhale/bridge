@@ -72,7 +72,10 @@ export async function apply(ctx, config = {}) {
 
   // 转录：会话里发生的事 → 库里 记录/日志/agent.dsh-raw/<日期>/会话-<短id>.md
   // 库根目录由 Obsidian 插件推上来（/vault）；没推就什么都不写。
-  const transcriptStore = createTranscriptStore({ agent: 'agent.dsh' });
+  const transcriptStore = createTranscriptStore({
+    agent: 'agent.dsh',
+    stateFile: path.join(os.homedir(), '.dsh-bridge', 'vault.json'),
+  });
   const transcriptService = createTranscriptService({
     store: transcriptStore,
     sessionsRoot: path.join(os.homedir(), '.dsh', 'sessions'),

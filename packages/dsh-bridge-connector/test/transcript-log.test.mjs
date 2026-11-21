@@ -118,6 +118,16 @@ test('跨天会新建一篇，不是把新的一天塞进旧文件', () => {
   assert.ok(fs.existsSync(path.join(base, '2026-11-21', '会话-s1.md')));
 });
 
+
+test('库路径记在盘上：重启后不用等插件再推一次', () => {
+  const root = tmp();
+  const stateFile = path.join(root, 'vault.json');
+  const a = createTranscriptStore({ root: '', agent: 'agent.dsh', stateFile });
+  assert.equal(a.root, '', '没有记录时就是空的');
+  a.setRoot('D:\\个人数据\\辞玖');
+  const b = createTranscriptStore({ root: '', agent: 'agent.dsh', stateFile });
+  assert.equal(b.root, 'D:\\个人数据\\辞玖', '下次启动自己捡回来');
+});
 test('没有库路径就什么都不写，也不炸', () => {
   const store = createTranscriptStore({ root: '' });
   const r = store.appendEvents({ sessionId: 'session-s1', events: [{ seq: 1, timeMs: Date.now(), role: 'user', body: 'x', tools: [] }] });
