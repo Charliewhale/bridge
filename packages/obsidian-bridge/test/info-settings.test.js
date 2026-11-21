@@ -124,3 +124,10 @@ test('注入节奏：间隔默认每次，次数默认不限期，值都收得�
   assert.equal(normalizeSettings({ injectTimes: -3 }).injectTimes, 0);
   assert.equal(normalizeSettings({ injectTimes: 'x' }).injectTimes, 0);
 });
+
+test('会话转录默认关：装了插件不会往别人库里写东西', () => {
+  assert.equal(normalizeSettings({}).transcript, false);
+  assert.equal(normalizeSettings({ transcript: true }).transcript, true);
+  assert.equal(normalizeSettings({ transcript: 'yes' }).transcript, false);
+  assert.equal(normalizeSettings({ transcript: 1 }).transcript, false);
+});

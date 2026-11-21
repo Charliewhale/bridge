@@ -187,8 +187,8 @@ module.exports = class ObsidianBridgePlugin extends Plugin {
 
     // 当前打开的笔记：持续推给连接器，让 agent 不用等主人开口就知道屏幕上是什么。
     this.trackActiveNote();
-    // 库根目录也推一份：连接器写会话转录时要知道往哪个库里落
-    this.pushVaultPath();
+    // 库根目录也推一份：连接器写会话转录时要知道往哪个库里落（开关关着就不推）
+    this.syncTranscriptRoot();
 
     // 上次面板是开着的就自动恢复：改代码后 reload、或者重启 Obsidian，
     // 侧栏那个视图会被一起收掉，不该让主人每次都手动点回来。
@@ -213,13 +213,16 @@ module.exports = class ObsidianBridgePlugin extends Plugin {
     }
   }
 
-  // 把库根目录推给连接器。失败不吵人：连接器没起来的时候它本来就走不到转录。
-  async pushVaultPath() {
+  // 把库根目录推给连接器（或者推空 = 关掉转录）。
+  // 失败不吵人：连接器没起来的时候它本来就走不到转录。
+  async syncTranscriptRoot() {
     try {
-      const base = (this.app.vault.adapter && this.app.vault.adapter.getBasePath) ? this.app.vault.adapter.getBasePath() : '';
-      if (!base) return;
+      const on = this.settings.transcript === true;
+      const base = on && this.app.vault.adapter && this.app.vault.adapter.getBasePath
+        ? this.app.vault.adapter.getBasePath()
+        : '';
       await this.connector().pushVault(base);
-      this.logEvent('vault', '库路径已同步：' + base);
+      if (on && base) this.logEvent('transcript', '转录已开启，写到：' + base);
     } catch {
       /* 连接器没起来就下次再说 */
     }
@@ -1316,6 +1319,20 @@ class BridgeSettingTab extends PluginSettingTab {
         }
       })
       .catch(() => {});
+
+    containerEl.createEl('h3', { text: '会话转录' });
+    new Setting(containerEl)
+      .setName('把会话写进库里')
+      .setDesc('只记对话和用过的工具名，不抄工具参数与回显；写到 记录/日志/agent.dsh-raw/<日期>/会话-<短id>.md')
+      .addToggle((toggle) =>
+        toggle.setValue(plugin.settings.transcript === true).onChange(async (value) => {
+          plugin.settings.transcript = value;
+          await plugin.saveSettings();
+          await plugin.syncTranscriptRoot();
+          new Notice(value ? '会话转录已开启' : '会话转录已关闭');
+          this.display();
+        }),
+      );
 
     containerEl.createEl('h3', { text: '审计账本' });
     containerEl.createEl('p', {

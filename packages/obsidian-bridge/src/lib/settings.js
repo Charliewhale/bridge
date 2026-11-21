@@ -16,6 +16,9 @@ const DEFAULTS = {
   // 注入的节奏：每 injectEvery 轮带一次（1 = 每次都带）；injectTimes 一共带几次（0 = 不限期）
   injectEvery: 1,
   injectTimes: 0,
+  // 会话转录：把 DSH 会话里"谁说了什么、用过什么工具"写进库里。
+  // 默认关——装了插件就往别人库里写文件不合适，要用户自己点头。
+  transcript: false,
   tokenTtl: 0,
   tokenIssuedAt: 0,
 };
@@ -42,6 +45,7 @@ function normalizeSettings(raw) {
   const injectEvery = Number.isFinite(rawEvery) && rawEvery >= 1 ? Math.min(99, Math.floor(rawEvery)) : 1;
   const rawTimes = Number(src.injectTimes);
   const injectTimes = Number.isFinite(rawTimes) && rawTimes > 0 ? Math.min(99, Math.floor(rawTimes)) : 0;
+  const transcript = typeof src.transcript === 'boolean' ? src.transcript : DEFAULTS.transcript;
 
   return {
     enabled,
@@ -56,6 +60,7 @@ function normalizeSettings(raw) {
     injectionEnabled,
     injectEvery,
     injectTimes,
+    transcript,
     tokenTtl,
     tokenIssuedAt,
   };
