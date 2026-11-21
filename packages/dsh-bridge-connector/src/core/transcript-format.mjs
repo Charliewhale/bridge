@@ -132,12 +132,14 @@ export function toTranscriptEvent(rec, { sessionId = '', cwd = '', withReasoning
 export function renderEntry(ev) {
   const role = (ev && ev.role) || 'system';
   const head = '## ' + hhmmssOf(ev && ev.timeMs) + ' · ' + (ROLE_LABEL[role] || '系统');
-  const body = ev && typeof ev.body === 'string' && ev.body.trim() ? ev.body : '（没有文字）';
+  const body = ev && typeof ev.body === 'string' ? ev.body.trim() : '';
   const tools = ev && Array.isArray(ev.tools) ? ev.tools.filter(Boolean) : [];
-  const tail = tools.length
-    ? '\n\n> 用了 ' + tools.length + ' 个工具：' + tools.join('、')
-    : '';
-  return head + '\n\n' + body + tail + '\n';
+  const parts = [];
+  // 只调工具不说话的那些步骤：不写"（没有文字）"占位，一行工具名就够了
+  if (body) parts.push(body);
+  if (tools.length) parts.push('> 用了 ' + tools.length + ' 个工具：' + tools.join('、'));
+  if (!parts.length) parts.push('（空）');
+  return head + '\n\n' + parts.join('\n\n') + '\n';
 }
 
 /** 篇头：只在新建那一篇时写一次。故意不写「共 N 条」——这篇会一直追加。 */

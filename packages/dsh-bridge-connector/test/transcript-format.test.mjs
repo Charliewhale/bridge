@@ -84,7 +84,7 @@ test('只调工具不说话的那条也要留个痕，别整条消失', () => {
     data: { message: { content: [{ type: 'tool-call', name: 'obsidian_exec', arguments: '{}' }] } },
   });
   assert.equal(ev.body, '');
-  assert.equal(renderEntry(ev), '## 15:22:41 · 我\n\n（没有文字）\n\n> 用了 1 个工具：obsidian_exec\n');
+  assert.equal(renderEntry(ev), '## 15:22:41 · 我\n\n> 用了 1 个工具：obsidian_exec\n');
 });
 
 test('thinking 默认不收，要的话折进 details', () => {

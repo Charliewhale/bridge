@@ -162,6 +162,7 @@ export function startConnector(options) {
     injectionState = { on: false },
     obsidianProbe = null,
     transcriptStore = null,
+    onVaultRoot = null,
   } = options;
 
 
@@ -693,7 +694,10 @@ export function startConnector(options) {
       const payload = await readJsonBody(req, res);
       if (!payload) return;
       const root = String(payload.path || '').trim();
-      if (transcriptStore) transcriptStore.setRoot(root);
+      if (transcriptStore) {
+        transcriptStore.setRoot(root);
+        if (root && typeof onVaultRoot === 'function') onVaultRoot(root);
+      }
       json(res, 200, { ok: true, data: { root: transcriptStore ? transcriptStore.root : '' } });
       return;
     }

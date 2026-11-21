@@ -52,6 +52,11 @@ export function createTranscriptService({
     return state.sessions[key];
   }
 
+  /** 库里还没落点（插件还没推库路径）时绝不消费事件：游标一动，那批事件就永远丢了。 */
+  function writable() {
+    return Boolean(store && store.root);
+  }
+
   function writeEvents(sessionId, events, cwd) {
     if (!events.length) return 0;
     const r = store.appendEvents({ sessionId, cwd, events });
@@ -61,6 +66,7 @@ export function createTranscriptService({
   /** 一条实时事件。返回是否真的写进去了（便于测试和日志）。 */
   function noteEvent(session, event) {
     if (!event || !started) return false;
+    if (!writable()) return false;
     const sessionId = String((session && session.id) || '');
     if (!sessionId) return false;
     const entry = entryOf(sessionId);
@@ -76,6 +82,7 @@ export function createTranscriptService({
 
   /** 从日志补漏：只读偏移之后的部分，只认 seq 比记录更大的。 */
   function backfillSession(fileInfo) {
+    if (!writable()) return 0;
     const entry = entryOf(fileInfo.id);
     if (fileInfo.size > maxBytes) return 0;
     const { records, offsetAfter } = decodeFrom(fileInfo.path, entry.offset || 0);
@@ -109,6 +116,20 @@ export function createTranscriptService({
   }
 
   /** 首次启动：把已有会话的位置记下来（不回补历史），再把最近几天的漏网补上。 */
+  /** 库路径到了之后补一次：把"库里还没落点"那段时间攒下的事件一次性补上。 */
+  function backfillRecent() {
+    if (!writable()) return { touched: 0, skipped: 0 };
+    let touched = 0;
+    for (const f of recentFiles()) {
+      try {
+        touched += backfillSession(f);
+      } catch (err) {
+        log('补漏失败 ' + f.id + '：' + String((err && err.message) || err));
+      }
+    }
+    return { touched, skipped: 0 };
+  }
+
   function start() {
     loadState();
     started = true;
@@ -143,6 +164,7 @@ export function createTranscriptService({
   return {
     start,
     stop,
+    backfillRecent,
     noteEvent,
     backfillSession,
     get state() {

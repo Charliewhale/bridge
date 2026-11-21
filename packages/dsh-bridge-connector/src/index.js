@@ -94,6 +94,7 @@ export async function apply(ctx, config = {}) {
         injectionFile: INJECTION_FILE,
         injectionState,
         transcriptStore,
+        onVaultRoot: () => transcriptService.backfillRecent(),
         workspaceRegistry,
       });
       break;
