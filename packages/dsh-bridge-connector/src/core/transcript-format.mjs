@@ -12,6 +12,8 @@
 
 /** 进转录的事件类型。 */
 export const KEEP_TYPES = {
+  'turn/start': '轮次',
+  'turn/end': '轮次',
   'user/message': '用户',
   'assistant/message': '助手',
   'tool/result': '工具结果',
@@ -142,6 +144,15 @@ export function toTranscriptEvent(rec, { withReasoning = false } = {}) {
     return null;
   }
 
+  if (type === 'turn/start' || type === 'turn/end') {
+    // 轮次只当路标，不搬内容：出事时按"第几轮"直接跳到那一段
+    const turn = data.turn;
+    const kind = type === 'turn/start'
+      ? '开始'
+      : '结束' + ((data.reason && data.reason.kind) ? '（' + data.reason.kind + '）' : '');
+    return { seq: rec.seq ?? null, timeMs, role: 'turn', label: '第 ' + turn + ' 轮' + kind, body: '', tools: [] };
+  }
+
   // compaction/summary
   const parts = (data.message && data.message.content) || data.content || [];
   return {
@@ -171,11 +182,16 @@ function fenceFor(body) {
 export function renderEntry(ev) {
   const stamp = hhmmssOf(ev && ev.timeMs);
 
+  if (ev && ev.role === 'turn') return '## ' + stamp + ' · ' + String(ev.label || '轮次') + '\n';
+
   if (ev && ev.role === 'tool') {
     const name = ev.tool || ev.toolOf || '?';
     const state = ev.ok === false ? '失败' : '成功';
     const head = '## ' + stamp + ' · 工具 · ' + name + ' · ' + state + '（' + (ev.chars || 0) + ' 字）';
-    const { text, clipped, total } = clipResult(ev.body);
+    // 失败的那条一个字都不截：堆栈被切一半，排查等于白查（2026-11-21 定）
+    const { text, clipped, total } = ev.ok === false
+      ? { text: ev.body || '', clipped: false, total: (ev.body || '').length }
+      : clipResult(ev.body);
     const fence = fenceFor(text);
     const block = fence + 'text\n' + text.replace(/\n$/, '') + '\n' + fence;
     const note = clipped ? '\n\n> …（共 ' + total + ' 字，这里留了前 ' + text.length + ' 字）' : '';

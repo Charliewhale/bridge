@@ -15,11 +15,24 @@ import {
 
 const at = (iso) => Date.parse(iso);
 
-test('进转录的只有对话、工具结果、上下文压缩', () => {
-  for (const t of ['user/message', 'assistant/message', 'tool/result', 'compaction/summary']) assert.ok(KEEP_TYPES[t], t);
-  for (const t of ['step/start', 'tool/call', 'turn/start', 'turn/end', 'system/message', 'session']) {
+test('进转录的：轮次、对话、工具结果、上下文压缩', () => {
+  for (const t of ['turn/start', 'turn/end', 'user/message', 'assistant/message', 'tool/result', 'compaction/summary']) {
+    assert.ok(KEEP_TYPES[t], t);
+  }
+  for (const t of ['step/start', 'tool/call', 'system/message', 'session']) {
     assert.equal(toTranscriptEvent({ type: t, seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 1 } }), null, t);
   }
+});
+
+test('轮次当路标：只有一行「第 N 轮开始 / 结束」', () => {
+  const start = toTranscriptEvent({ type: 'turn/start', seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 52 } });
+  assert.equal(start.role, 'turn');
+  assert.equal(renderEntry(start), '## 15:22:37 · 第 52 轮开始\n');
+
+  const end = toTranscriptEvent({
+    type: 'turn/end', seq: 2, time: at('2026-11-20T15:33:10+08:00'), data: { turn: 52, reason: { kind: 'completed' } },
+  });
+  assert.equal(renderEntry(end), '## 15:33:10 · 第 52 轮结束（completed）\n');
 });
 
 test('没有时间的记录不猜时间', () => {
@@ -90,19 +103,23 @@ test('tool/result：留结果正文，标成功/失败和字数', () => {
   assert.equal(renderEntry({ ...ev, tool: 'pwsh' }), '## 15:22:42 · 工具 · pwsh · 成功（4 字）\n\n```text\n输出结果\n```\n');
 });
 
-test('失败的结果标成失败', () => {
+test('失败的结果标成失败，而且一个字都不截', () => {
+  const long = 'x'.repeat(TOOL_RESULT_LIMIT + 3000);
   const ev = toTranscriptEvent({
     type: 'tool/result',
     seq: 13,
     time: at('2026-11-20T15:22:43+08:00'),
     data: {
       message: {
-        content: [{ type: 'tool-result', toolCallId: 'call_9', isError: true, content: [{ type: 'text', text: 'boom' }] }],
+        content: [{ type: 'tool-result', toolCallId: 'call_9', isError: true, content: [{ type: 'text', text: long }] }],
       },
     },
   });
   assert.equal(ev.ok, false);
-  assert.match(renderEntry({ ...ev, tool: 'edit' }), /· 工具 · edit · 失败（4 字）/);
+  const out = renderEntry({ ...ev, tool: 'edit' });
+  assert.match(out, /· 工具 · edit · 失败（5000 字）/);
+  assert.ok(out.includes(long), '失败的堆栈要全留');
+  assert.equal(/这里留了前/.test(out), false, '失败不该有截断说明');
 });
 
 test('空结果不要；正文里带三个反引号时围栏自动加长', () => {
