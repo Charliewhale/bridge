@@ -5174,6 +5174,10 @@ class BridgeSettingTab extends PluginSettingTab {
       }
     };
 
+    // 录到的组合键要跨 redraw 留着：点完「设为」整行会重建，
+    // 状态放在重建外面，框里才不会又变回空（2026-11-22 辞玖提的）
+    let pending = null;
+
     const redraw = () => {
       host.empty();
       const setting = new Setting(host).setName(name);
@@ -5204,9 +5208,9 @@ class BridgeSettingTab extends PluginSettingTab {
       // 录制靠一个只读输入框：点它有焦点，keydown 一定收得到。
       // 之前试过在设置页挂 document 监听、又试过弹 Modal，都没收到按键——
       // 焦点不在自己手上时按键会被别处吃掉。输入框不会有这个问题。
-      let pending = null;
       setting.addText((text) => {
         text.setPlaceholder('点这里，然后按组合键');
+        if (pending) text.setValue(this.formatHotkeys([pending]));
         text.inputEl.readOnly = true;
         text.inputEl.addEventListener('keydown', (ev) => {
           ev.preventDefault();
@@ -5253,6 +5257,7 @@ class BridgeSettingTab extends PluginSettingTab {
           .setTooltip('清除快捷键')
           .onClick(async () => {
             if (await write([])) {
+              pending = null;
               new Notice('标记快捷键已清除');
               redraw();
             }
@@ -5271,6 +5276,7 @@ class BridgeSettingTab extends PluginSettingTab {
           .setTooltip('恢复默认')
           .onClick(async () => {
             if (await write(defaults)) {
+              pending = defaults && defaults[0] ? { ...defaults[0] } : null;
               new Notice('已恢复默认快捷键');
               redraw();
             }
