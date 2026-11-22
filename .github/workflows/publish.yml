@@ -1,0 +1,34 @@
+name: publish
+
+# Publish to npm via trusted publishing (OIDC).
+# No long-lived token, no 2FA staged-publish dance.
+# Prerequisite: bind this package to this workflow once, on npmjs.com.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/dsh-bridge-connector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - name: update npm (OIDC publish needs a recent CLI)
+        run: npm install -g npm@latest
+      - name: test
+        run: node --test
+      - name: publish
+        run: npm publish --provenance --access public
