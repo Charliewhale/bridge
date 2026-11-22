@@ -9,7 +9,7 @@ import { createTranscriptStore } from '../src/core/transcript-store.mjs';
 import { createTranscriptService } from '../src/core/transcript-service.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-svc-'));
-const iso = (s) => Date.parse(s);
+const iso = (y, mo, d, h, mi, s) => new Date(y, mo - 1, d, h, mi, s).getTime();
 
 function writeLog(file, records) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -34,9 +34,9 @@ test('实时事件只写一次，同一 seq 再来不吃', () => {
   const { svc, vault } = rig();
   svc.start();
   const session = { id: 'session-abcd1234-x', cwd: 'D:\\RAG' };
-  assert.equal(svc.noteEvent(session, human(1, iso('2026-11-20T15:00:01+08:00'))), true);
-  assert.equal(svc.noteEvent(session, human(1, iso('2026-11-20T15:00:01+08:00'))), false);
-  assert.equal(svc.noteEvent(session, human(2, iso('2026-11-20T15:00:02+08:00'))), true);
+  assert.equal(svc.noteEvent(session, human(1, iso(2026, 11, 20, 15, 0, 1))), true);
+  assert.equal(svc.noteEvent(session, human(1, iso(2026, 11, 20, 15, 0, 1))), false);
+  assert.equal(svc.noteEvent(session, human(2, iso(2026, 11, 20, 15, 0, 2))), true);
   const file = path.join(vault, '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-abcd1234.md');
   const text = fs.readFileSync(file, 'utf8');
   assert.equal(text.split('第1句').length - 1, 1, '只出现一次');
@@ -46,7 +46,7 @@ test('实时事件只写一次，同一 seq 再来不吃', () => {
 test('第一次见到老日志：只记位置，不把历史重抄一遍', () => {
   const { svc, sessionsRoot, vault, stateFile } = rig();
   const file = path.join(sessionsRoot, 'D-RAG', 'session-old00001', 'session.v3.jsonl.zstd');
-  writeLog(file, [human(1, iso('2026-11-19T10:00:00+08:00')), human(2, iso('2026-11-19T10:00:01+08:00'))]);
+  writeLog(file, [human(1, iso(2026, 11, 19, 10, 0, 0)), human(2, iso(2026, 11, 19, 10, 0, 1))]);
   svc.start();
   const raw = path.join(vault, '记录', '日志', 'agent.dsh-raw');
   assert.equal(fs.existsSync(raw), false, '历史不该被重抄进库');
@@ -57,10 +57,10 @@ test('第一次见到老日志：只记位置，不把历史重抄一遍', () =>
 test('日志长出来之后，回补只补新事件', () => {
   const { svc, sessionsRoot, vault } = rig();
   const file = path.join(sessionsRoot, 'D-RAG', 'session-new00001', 'session.v3.jsonl.zstd');
-  writeLog(file, [human(1, iso('2026-11-20T10:00:00+08:00'))]);
+  writeLog(file, [human(1, iso(2026, 11, 20, 10, 0, 0))]);
   svc.start(); // 首见：跳过
 
-  fs.appendFileSync(file, zstdCompressSync(Buffer.from(JSON.stringify(human(2, iso('2026-11-20T10:00:05+08:00'))) + '\n')));
+  fs.appendFileSync(file, zstdCompressSync(Buffer.from(JSON.stringify(human(2, iso(2026, 11, 20, 10, 0, 5))) + '\n')));
   const written = svc.backfillSession({ id: 'session-new00001', path: file, cwd: 'D-RAG', size: fs.statSync(file).size });
   assert.equal(written, 1);
   const out = path.join(vault, '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-new00001.md');
@@ -72,11 +72,11 @@ test('日志长出来之后，回补只补新事件', () => {
 test('老状态重放不会重复写（seq 去重）', () => {
   const { svc, sessionsRoot } = rig();
   const file = path.join(sessionsRoot, 'D-RAG', 'session-dup000001', 'session.v3.jsonl.zstd');
-  writeLog(file, [human(5, iso('2026-11-20T10:00:00+08:00'))]);
+  writeLog(file, [human(5, iso(2026, 11, 20, 10, 0, 0))]);
   svc.start();
   // 假装上次跑到 seq=7
   svc.state.sessions['session-dup000001'].lastSeq = 7;
-  fs.appendFileSync(file, zstdCompressSync(Buffer.from(JSON.stringify(human(6, iso('2026-11-20T10:00:01+08:00'))) + '\n')));
+  fs.appendFileSync(file, zstdCompressSync(Buffer.from(JSON.stringify(human(6, iso(2026, 11, 20, 10, 0, 1))) + '\n')));
   const written = svc.backfillSession({ id: 'session-dup000001', path: file, cwd: 'D-RAG', size: fs.statSync(file).size });
   assert.equal(written, 0, 'seq 6 <= 7，不该写');
 });
@@ -87,11 +87,11 @@ test('库路径还没到：先不消费，等路径来了照原样补回来', ()
   store.setRoot('');
   svc.start();
   const session = { id: 'session-late00001', cwd: 'D:\\RAG' };
-  assert.equal(svc.noteEvent(session, human(1, iso('2026-11-20T15:00:01+08:00'))), false);
+  assert.equal(svc.noteEvent(session, human(1, iso(2026, 11, 20, 15, 0, 1))), false);
   assert.equal(svc.state.sessions['session-late00001'], undefined, '没写进去就不许记游标');
 
   store.setRoot(vault);
-  assert.equal(svc.noteEvent(session, human(1, iso('2026-11-20T15:00:01+08:00'))), true, '路径到了还能补上');
+  assert.equal(svc.noteEvent(session, human(1, iso(2026, 11, 20, 15, 0, 1))), true, '路径到了还能补上');
   const file = path.join(vault, '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-late00001.md');
   assert.match(fs.readFileSync(file, 'utf8'), /第1句/);
 });
@@ -101,7 +101,7 @@ test('backfillRecent：路径到了之后把这段时间攒的补进来', () => 
   store.setRoot('');
   svc.start();
   const file = path.join(sessionsRoot, 'D-RAG', 'session-late00002', 'session.v3.jsonl.zstd');
-  writeLog(file, [human(1, iso('2026-11-20T11:00:00+08:00'))]);
+  writeLog(file, [human(1, iso(2026, 11, 20, 11, 0, 0))]);
   svc.state.sessions['session-late00002'] = { offset: 0, lastSeq: -1 };
   store.setRoot(vault);
   const r = svc.backfillRecent();
@@ -114,7 +114,7 @@ test('工具结果跟名字对得上：结果那条自己不带工具名，靠�
   const { svc, vault } = rig();
   svc.start();
   const session = { id: 'session-tool00001', cwd: 'D:\\RAG' };
-  const t0 = iso('2026-11-20T15:00:00+08:00');
+  const t0 = iso(2026, 11, 20, 15, 0, 0);
   svc.noteEvent(session, {
     type: 'assistant/message', seq: 1, time: t0,
     data: { message: { content: [

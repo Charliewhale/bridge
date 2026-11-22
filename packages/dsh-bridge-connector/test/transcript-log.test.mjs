@@ -9,7 +9,7 @@ import { listSessionFiles, decodeFrom } from '../src/core/session-log.mjs';
 import { createTranscriptStore } from '../src/core/transcript-store.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-tx-'));
-const iso = (s) => Date.parse(s);
+const iso = (y, mo, d, h, mi, s) => new Date(y, mo - 1, d, h, mi, s).getTime();
 
 function writeLog(file, records, { truncateLastFrame = false } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -23,7 +23,7 @@ function writeLog(file, records, { truncateLastFrame = false } = {}) {
 test('日志文件能被找出来，带 cwd 和短 id', () => {
   const root = tmp();
   const file = path.join(root, 'D-RAG', 'session-abc12345-1', 'session.v3.jsonl.zstd');
-  writeLog(file, [{ type: 'session', seq: 0, time: iso('2026-11-20T15:00:00+08:00') }]);
+  writeLog(file, [{ type: 'session', seq: 0, time: iso(2026, 11, 20, 15, 0, 0) }]);
   const list = listSessionFiles(root);
   assert.equal(list.length, 1);
   assert.equal(list[0].id, 'session-abc12345-1');
@@ -35,9 +35,9 @@ test('从偏移续读：只回后面的，偏移停在没写全的那一帧之�
   const root = tmp();
   const file = path.join(root, 'x', 'session-s1', 'session.v3.jsonl.zstd');
   const recs = [
-    { type: 'turn/start', seq: 1, time: iso('2026-11-20T15:00:01+08:00'), data: { turn: 1 } },
-    { type: 'turn/end', seq: 2, time: iso('2026-11-20T15:00:02+08:00'), data: { turn: 1, reason: { kind: 'ok' } } },
-    { type: 'turn/start', seq: 3, time: iso('2026-11-20T15:00:03+08:00'), data: { turn: 2 } },
+    { type: 'turn/start', seq: 1, time: iso(2026, 11, 20, 15, 0, 1), data: { turn: 1 } },
+    { type: 'turn/end', seq: 2, time: iso(2026, 11, 20, 15, 0, 2), data: { turn: 1, reason: { kind: 'ok' } } },
+    { type: 'turn/start', seq: 3, time: iso(2026, 11, 20, 15, 0, 3), data: { turn: 2 } },
   ];
   writeLog(file, recs);
 
@@ -51,7 +51,7 @@ test('从偏移续读：只回后面的，偏移停在没写全的那一帧之�
 
   // 追加后从旧偏移续读，只拿到新的
   const more = Buffer.concat([
-    zstdCompressSync(Buffer.from(JSON.stringify({ type: 'turn/end', seq: 4, time: iso('2026-11-20T15:00:04+08:00'), data: { turn: 2, reason: { kind: 'ok' } } }) + '\n')),
+    zstdCompressSync(Buffer.from(JSON.stringify({ type: 'turn/end', seq: 4, time: iso(2026, 11, 20, 15, 0, 4), data: { turn: 2, reason: { kind: 'ok' } } }) + '\n')),
   ]);
   fs.appendFileSync(file, more);
   const third = decodeFrom(file, all.offsetAfter);
@@ -62,8 +62,8 @@ test('最后一帧没写全时不吞数据：偏移退回到它的起点', () =>
   const root = tmp();
   const file = path.join(root, 'x', 'session-s2', 'session.v3.jsonl.zstd');
   const good = [
-    { type: 'turn/start', seq: 1, time: iso('2026-11-20T15:00:01+08:00'), data: { turn: 1 } },
-    { type: 'turn/start', seq: 2, time: iso('2026-11-20T15:00:02+08:00'), data: { turn: 2 } },
+    { type: 'turn/start', seq: 1, time: iso(2026, 11, 20, 15, 0, 1), data: { turn: 1 } },
+    { type: 'turn/start', seq: 2, time: iso(2026, 11, 20, 15, 0, 2), data: { turn: 2 } },
   ];
   const full = writeLog(file, good);
   const frame2 = zstdCompressSync(Buffer.from(JSON.stringify(good[1]) + '\n'));
@@ -81,8 +81,8 @@ test('转录按天按会话落盘：先建篇头，后续追加不重写篇头',
   const root = tmp();
   const store = createTranscriptStore({ root: path.join(root, 'vault'), agent: 'agent.dsh' });
   const day1 = [
-    { seq: 1, timeMs: iso('2026-11-20T15:22:37+08:00'), role: 'system', body: '（摘要）', tools: [] },
-    { seq: 2, timeMs: iso('2026-11-20T15:22:40+08:00'), role: 'user', body: '改个名', tools: [] },
+    { seq: 1, timeMs: iso(2026, 11, 20, 15, 22, 37), role: 'system', body: '（摘要）', tools: [] },
+    { seq: 2, timeMs: iso(2026, 11, 20, 15, 22, 40), role: 'user', body: '改个名', tools: [] },
   ];
   store.appendEvents({ sessionId: 'session-712f4f31-4faa-49a2-8df3-06b03686990f', cwd: 'D:\\RAG', events: day1 });
   const file = path.join(root, 'vault', '记录', '日志', 'agent.dsh-raw', '2026-11-20', '会话-712f4f31.md');
@@ -94,7 +94,7 @@ test('转录按天按会话落盘：先建篇头，后续追加不重写篇头',
   store.appendEvents({
     sessionId: 'session-712f4f31-4faa-49a2-8df3-06b03686990f',
     cwd: 'D:\\RAG',
-    events: [{ seq: 3, timeMs: iso('2026-11-20T15:23:00+08:00'), role: 'assistant', body: '看完了', tools: ['pwsh'] }],
+    events: [{ seq: 3, timeMs: iso(2026, 11, 20, 15, 23, 0), role: 'assistant', body: '看完了', tools: ['pwsh'] }],
   });
   const second = fs.readFileSync(file, 'utf8');
   assert.equal(second.split('# agent.dsh').length, 2, '篇头只出现一次');
@@ -107,11 +107,11 @@ test('跨天会新建一篇，不是把新的一天塞进旧文件', () => {
   const store = createTranscriptStore({ root: path.join(root, 'vault'), agent: 'agent.dsh' });
   store.appendEvents({
     sessionId: 'session-s1',
-    events: [{ seq: 1, timeMs: iso('2026-11-20T23:59:59+08:00'), role: 'user', body: 'a', tools: [] }],
+    events: [{ seq: 1, timeMs: iso(2026, 11, 20, 23, 59, 59), role: 'user', body: 'a', tools: [] }],
   });
   store.appendEvents({
     sessionId: 'session-s1',
-    events: [{ seq: 2, timeMs: iso('2026-11-21T00:00:01+08:00'), role: 'user', body: 'b', tools: [] }],
+    events: [{ seq: 2, timeMs: iso(2026, 11, 21, 0, 0, 1), role: 'user', body: 'b', tools: [] }],
   });
   const base = path.join(root, 'vault', '记录', '日志', 'agent.dsh-raw');
   assert.ok(fs.existsSync(path.join(base, '2026-11-20', '会话-s1.md')));

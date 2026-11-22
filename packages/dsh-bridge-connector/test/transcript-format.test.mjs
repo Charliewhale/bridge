@@ -13,24 +13,24 @@ import {
   hhmmssOf,
 } from '../src/core/transcript-format.mjs';
 
-const at = (iso) => Date.parse(iso);
+const at = (y, mo, d, h, mi, s) => new Date(y, mo - 1, d, h, mi, s).getTime();
 
 test('进转录的：轮次、对话、工具结果、上下文压缩', () => {
   for (const t of ['turn/start', 'turn/end', 'user/message', 'assistant/message', 'tool/result', 'compaction/summary']) {
     assert.ok(KEEP_TYPES[t], t);
   }
   for (const t of ['step/start', 'tool/call', 'system/message', 'session']) {
-    assert.equal(toTranscriptEvent({ type: t, seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 1 } }), null, t);
+    assert.equal(toTranscriptEvent({ type: t, seq: 1, time: at(2026, 11, 20, 15, 22, 37), data: { turn: 1 } }), null, t);
   }
 });
 
 test('轮次当路标：只有一行「第 N 轮开始 / 结束」', () => {
-  const start = toTranscriptEvent({ type: 'turn/start', seq: 1, time: at('2026-11-20T15:22:37+08:00'), data: { turn: 52 } });
+  const start = toTranscriptEvent({ type: 'turn/start', seq: 1, time: at(2026, 11, 20, 15, 22, 37), data: { turn: 52 } });
   assert.equal(start.role, 'turn');
   assert.equal(renderEntry(start), '## 15:22:37 · 第 52 轮开始\n');
 
   const end = toTranscriptEvent({
-    type: 'turn/end', seq: 2, time: at('2026-11-20T15:33:10+08:00'), data: { turn: 52, reason: { kind: 'completed' } },
+    type: 'turn/end', seq: 2, time: at(2026, 11, 20, 15, 33, 10), data: { turn: 52, reason: { kind: 'completed' } },
   });
   assert.equal(renderEntry(end), '## 15:33:10 · 第 52 轮结束（completed）\n');
 });
@@ -43,7 +43,7 @@ test('user/message：只收真人说的', () => {
   const human = toTranscriptEvent({
     type: 'user/message',
     seq: 10,
-    time: at('2026-11-20T15:22:37+08:00'),
+    time: at(2026, 11, 20, 15, 22, 37),
     data: { source: { kind: 'user' }, content: [{ type: 'text', text: '改个名' }] },
   });
   assert.equal(human.role, 'user');
@@ -52,7 +52,7 @@ test('user/message：只收真人说的', () => {
     toTranscriptEvent({
       type: 'user/message',
       seq: 10,
-      time: at('2026-11-20T15:22:37+08:00'),
+      time: at(2026, 11, 20, 15, 22, 37),
       data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'x' }] },
     }),
     null
@@ -63,7 +63,7 @@ test('assistant/message：正文 + 去重后的工具名，参数不进来', () 
   const ev = toTranscriptEvent({
     type: 'assistant/message',
     seq: 11,
-    time: at('2026-11-20T15:22:40+08:00'),
+    time: at(2026, 11, 20, 15, 22, 40),
     data: {
       message: {
         content: [
@@ -89,7 +89,7 @@ test('tool/result：留结果正文，标成功/失败和字数', () => {
   const ev = toTranscriptEvent({
     type: 'tool/result',
     seq: 12,
-    time: at('2026-11-20T15:22:42+08:00'),
+    time: at(2026, 11, 20, 15, 22, 42),
     data: {
       message: {
         content: [{ type: 'tool-result', toolCallId: 'call_1', isError: false, content: [{ type: 'text', text: '输出结果' }] }],
@@ -108,7 +108,7 @@ test('失败的结果标成失败，而且一个字都不截', () => {
   const ev = toTranscriptEvent({
     type: 'tool/result',
     seq: 13,
-    time: at('2026-11-20T15:22:43+08:00'),
+    time: at(2026, 11, 20, 15, 22, 43),
     data: {
       message: {
         content: [{ type: 'tool-result', toolCallId: 'call_9', isError: true, content: [{ type: 'text', text: long }] }],
@@ -127,12 +127,12 @@ test('空结果不要；正文里带三个反引号时围栏自动加长', () =>
     toTranscriptEvent({
       type: 'tool/result',
       seq: 14,
-      time: at('2026-11-20T15:22:44+08:00'),
+      time: at(2026, 11, 20, 15, 22, 44),
       data: { message: { content: [{ type: 'tool-result', toolCallId: 'c', content: [{ type: 'text', text: '   ' }] }] } },
     }),
     null
   );
-  const r = renderEntry({ role: 'tool', timeMs: at('2026-11-20T09:00:00+08:00'), tool: 'read', ok: true, chars: 9, body: '```\nx\n```' });
+  const r = renderEntry({ role: 'tool', timeMs: at(2026, 11, 20, 9, 0, 0), tool: 'read', ok: true, chars: 9, body: '```\nx\n```' });
   assert.ok(r.includes('````text'), '围栏要比正文里最长的反引号还长');
 });
 
@@ -142,7 +142,7 @@ test('结果超长就截断，并写明截了多少', () => {
   assert.equal(c.clipped, true);
   assert.equal(c.text.length, TOOL_RESULT_LIMIT);
   assert.equal(c.total, TOOL_RESULT_LIMIT + 500);
-  const out = renderEntry({ role: 'tool', timeMs: at('2026-11-20T09:00:00+08:00'), tool: 'read', ok: true, chars: long.length, body: long });
+  const out = renderEntry({ role: 'tool', timeMs: at(2026, 11, 20, 9, 0, 0), tool: 'read', ok: true, chars: long.length, body: long });
   assert.match(out, /共 2500 字，这里留了前 2000 字/);
 });
 
@@ -150,7 +150,7 @@ test('上下文压缩那条保留', () => {
   const ev = toTranscriptEvent({
     type: 'compaction/summary',
     seq: 3,
-    time: at('2026-11-20T15:22:39+08:00'),
+    time: at(2026, 11, 20, 15, 22, 39),
     data: { message: { content: [{ type: 'text', text: '摘要' }] } },
   });
   assert.equal(ev.role, 'system');
@@ -158,7 +158,7 @@ test('上下文压缩那条保留', () => {
 });
 
 test('标题里的称呼和篇头格式', () => {
-  assert.equal(renderEntry({ role: 'user', timeMs: at('2026-11-20T09:05:06+08:00'), body: '在吗', tools: [] }), '## 09:05:06 · 你\n\n在吗\n');
+  assert.equal(renderEntry({ role: 'user', timeMs: at(2026, 11, 20, 9, 5, 6), body: '在吗', tools: [] }), '## 09:05:06 · 你\n\n在吗\n');
   const head = renderHeader({ agent: 'agent.dsh', day: '2026-11-20', label: '会话-x', session: 'session-x', cwd: 'D:\\RAG' });
   assert.match(head, /^# agent\.dsh · 2026-11-20 · 会话-x\n/);
   assert.match(head, /工具参数不记/);
@@ -168,6 +168,6 @@ test('标题里的称呼和篇头格式', () => {
 test('短名、日期、时刻', () => {
   assert.equal(shortIdOf('session-712f4f31-4faa-49a2-8df3-06b03686990f'), '712f4f31');
   assert.equal(shortIdOf('session-sched-task-3'), 'sched');
-  assert.equal(dayOf(Date.parse('2026-11-20T23:59:59+08:00')), '2026-11-20');
-  assert.equal(hhmmssOf(Date.parse('2026-11-20T09:05:06+08:00')), '09:05:06');
+  assert.equal(dayOf(new Date(2026, 10, 20, 23, 59, 59).getTime()), '2026-11-20');
+  assert.equal(hhmmssOf(new Date(2026, 10, 20, 9, 5, 6).getTime()), '09:05:06');
 });
