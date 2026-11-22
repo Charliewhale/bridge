@@ -1688,6 +1688,74 @@ function createDriver(deps = {}) {
 module.exports = { createDriver };
 
 });
+__define('lib/hotkey-binding.js', function (module, exports, require) {
+'use strict';
+// 快捷键读写：包住 Obsidian 的 hotkeyManager，保证「显示的就是实际生效的」。
+//
+// 这里有两条从 Obsidian 1.12.7 源码里读出来的硬事实（别再凭感觉写）：
+//   1. `setHotkeys` 只改内存（customKeys），**必须再调 `save()`** 才写进 .obsidian/hotkeys.json；
+//      不 save 的话，当前这轮还能按，重启/重载插件之后就回到默认——2026-11-22 就是这么翻车的。
+//   2. `getHotkeys` **只返回自定义**，默认键在 `getDefaultHotkeys` 里；
+//      只读 getHotkeys 会把「有默认键」误显示成「无」。
+//
+// 另外 `save()` 写的是整个 customKeys 快照，所以一次绑定只调一次即可。
+
+/** 当前生效的绑定：自定义优先，没有就用默认。 */
+function readHotkeys(manager, commandId) {
+  if (!manager || typeof manager.getHotkeys !== 'function') return [];
+  try {
+    const custom = manager.getHotkeys(commandId);
+    if (Array.isArray(custom)) return custom;
+    const fallback = typeof manager.getDefaultHotkeys === 'function' ? manager.getDefaultHotkeys(commandId) : null;
+    return Array.isArray(fallback) ? fallback : [];
+  } catch {
+    return [];
+  }
+}
+
+function sameBinding(a, b) {
+  return (
+    Array.isArray(a) &&
+    a.length === b.length &&
+    a.every(
+      (h, i) =>
+        h &&
+        b[i] &&
+        h.key === b[i].key &&
+        (Array.isArray(h.modifiers) ? h.modifiers : []).join('+') ===
+          (Array.isArray(b[i].modifiers) ? b[i].modifiers : []).join('+')
+    )
+  );
+}
+
+/**
+ * 绑定一组快捷键并落盘。
+ * @returns {Promise<boolean>} 真的写进 customKeys 且 save 成功才 true。
+ */
+async function bindHotkey(manager, commandId, list) {
+  if (!manager || typeof manager.setHotkeys !== 'function') return false;
+  const wanted = Array.isArray(list) ? list : [];
+  try {
+    manager.setHotkeys(commandId, wanted);
+  } catch {
+    return false;
+  }
+  // 回读确认它真收下了：有的组合会被 Obsidian 拒（键位冲突/格式不认），不能假装成功
+  const after = readHotkeys(manager, commandId);
+  if (!sameBinding(after, wanted)) return false;
+  if (typeof manager.save === 'function') {
+    try {
+      await manager.save();
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+module.exports = { bindHotkey, readHotkeys };
+
+});
 __define('lib/image-embed.js', function (module, exports, require) {
 'use strict';
 // Bridge · 面板里把图片显示出来。
@@ -4151,6 +4219,7 @@ const path = require('node:path');
 const { createDriver } = __req('lib/driver.js');
 const { createPermissions, LEVELS, LEVEL_LABEL } = __req('lib/permissions.js');
 const { createLedger } = __req('lib/ledger.js');
+const { bindHotkey, readHotkeys } = __req('lib/hotkey-binding.js');
 const { startCoreServer } = __req('lib/server.js');
 const { createInfoStore } = __req('lib/info.js');
 const { reconcileInjection } = __req('lib/settings.js');
@@ -5081,39 +5150,19 @@ class BridgeSettingTab extends PluginSettingTab {
     const available = mgr && typeof mgr.setHotkeys === 'function';
     const host = containerEl.createDiv({ cls: 'bridge-hotkey-host' });
 
-    const readCurrent = () => {
-      try {
-        return available && typeof mgr.getHotkeys === 'function' ? mgr.getHotkeys(commandId) || [] : [];
-      } catch {
-        return [];
-      }
-    };
+    // 自定义优先、没有就回落到默认键（只读 getHotkeys 会把默认键显示成「无」）
+    const readCurrent = () => readHotkeys(mgr, commandId);
 
     // 写完立刻回读：setHotkeys 不报错也可能没真的挂上（键位冲突、命令没注册完），
     // 不回读的话界面会显示「已绑定」，实际按下去什么都不会发生。
-    const write = (list) => {
-      try {
-        mgr.setHotkeys(commandId, list);
-      } catch (err) {
-        new Notice('写入快捷键失败：' + String((err && err.message) || err));
-        return false;
-      }
-      const after = readCurrent();
-      if (list.length === 0) return after.length === 0;
-      const same =
-        after.length === list.length &&
-        after.every(
-          (h, i) =>
-            h &&
-            list[i] &&
-            h.key === list[i].key &&
-            String(h.modifiers || []).join('+') === String(list[i].modifiers || []).join('+'),
-        );
-      if (!same) {
+    // 写完必须落盘：Obsidian 的 setHotkeys 只改内存，不 save 的话
+    // 这一轮能按、重启就回默认（2026-11-22 的 bug 就是漏了这一步）。
+    const write = async (list) => {
+      const ok = await bindHotkey(mgr, commandId, list);
+      if (!ok) {
         new Notice('快捷键没挂上：Obsidian 没接受这个组合（可能被别的命令占了）。换一个，或者点右边的「快捷键面板」在那边设。', 8000);
-        return false;
       }
-      return true;
+      return ok;
     };
 
     const openHotkeysPanel = () => {
@@ -5149,7 +5198,7 @@ class BridgeSettingTab extends PluginSettingTab {
 
       // 只允许一个快捷键（master 的要求）：多余的清掉，只留第一个
       if (list.length > 1) {
-        write([list[0]]);
+        write([list[0]]).catch(() => {});
       }
 
       // 录制靠一个只读输入框：点它有焦点，keydown 一定收得到。
@@ -5182,13 +5231,13 @@ class BridgeSettingTab extends PluginSettingTab {
         });
       });
       setting.addButton((btn) =>
-        btn.setButtonText('设为').setCta().onClick(() => {
+        btn.setButtonText('设为').setCta().onClick(async () => {
           if (!pending) {
             new Notice('先在左边的框里按一个组合键');
             return;
           }
           // 只留这一个：替换，不追加
-          if (write([pending])) {
+          if (await write([pending])) {
             new Notice('标记快捷键已设为 ' + this.formatHotkeys([pending]));
             redraw();
           } else {
@@ -5202,8 +5251,8 @@ class BridgeSettingTab extends PluginSettingTab {
         btn
           .setIcon('trash-2')
           .setTooltip('清除快捷键')
-          .onClick(() => {
-            if (write([])) {
+          .onClick(async () => {
+            if (await write([])) {
               new Notice('标记快捷键已清除');
               redraw();
             }
@@ -5220,8 +5269,8 @@ class BridgeSettingTab extends PluginSettingTab {
         btn
           .setIcon('rotate-ccw')
           .setTooltip('恢复默认')
-          .onClick(() => {
-            if (write(defaults)) {
+          .onClick(async () => {
+            if (await write(defaults)) {
               new Notice('已恢复默认快捷键');
               redraw();
             }
