@@ -1001,6 +1001,10 @@ class BridgeSettingTab extends PluginSettingTab {
       // 录制靠一个只读输入框：点它有焦点，keydown 一定收得到。
       // 之前试过在设置页挂 document 监听、又试过弹 Modal，都没收到按键——
       // 焦点不在自己手上时按键会被别处吃掉。输入框不会有这个问题。
+      //
+      // 框里**永远显示当前生效的那个键**：没在录制时用已绑定的值回填，
+      // 录到新的就显示新的。空着会让人以为没绑上（2026-11-22 辞玖提的）。
+      if (!pending && list.length) pending = { ...list[0] };
       setting.addText((text) => {
         text.setPlaceholder('点这里，然后按组合键');
         if (pending) text.setValue(this.formatHotkeys([pending]));
