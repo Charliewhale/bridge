@@ -25,7 +25,11 @@ function groupKeyOf(session) {
 // 把会话拆成「工作区分组 + 当前是哪篇」。排序留给界面，这里只管归类和识别。
 function planTree(sessions, currentId) {
   const list = Array.isArray(sessions) ? sessions.filter(Boolean) : [];
-  const visible = list.filter((s) => !s.archived);
+  const active = list.filter((s) => !s.archived);
+  // DSH 侧栏不显示空白会话；这里同样隐藏，但保留「当前正在用的那一个」，
+  // 否则刚新建完、还没发消息时会话树里找不到自己。
+  const hiddenBlank = active.filter((s) => s.blank && s.sessionId !== currentId).length;
+  const visible = active.filter((s) => !s.blank || s.sessionId === currentId);
   const groups = new Map();
   for (const s of visible) {
     const key = groupKeyOf(s);
@@ -36,7 +40,8 @@ function planTree(sessions, currentId) {
   return {
     visible,
     groups,
-    archivedCount: list.length - visible.length,
+    archivedCount: list.filter((s) => s.archived).length,
+    hiddenBlank,
     current,
     currentKey: current ? groupKeyOf(current) : null,
   };

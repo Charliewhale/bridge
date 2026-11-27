@@ -1,4 +1,4 @@
-# Bridge · 部署到 Obsidian 库
+﻿# Bridge · 部署到 Obsidian 库
 # 用法：powershell -File scripts\deploy.ps1 [-Vault "D:\个人数据\辞玖"]
 param(
   [string]$Vault = "D:\个人数据\辞玖"
@@ -22,6 +22,8 @@ if (Test-Path $dest) {
 
 Copy-Item (Join-Path $root "manifest.json") $dest -Force
 Copy-Item (Join-Path $root "dist\main.js") $dest -Force
+# 样式也要部署：漏了它，界面改动在 Obsidian 里看不见
+Copy-Item (Join-Path $root "styles.css") $dest -Force
 Write-Host "[3/3] 已部署到 $dest"
 Get-ChildItem $dest | Select-Object Name, Length | Format-Table -AutoSize
 Write-Host "启用：把 `"obsidian-bridge`" 写进 .obsidian/community-plugins.json，然后重启 Obsidian。"

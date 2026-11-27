@@ -57,3 +57,17 @@ test('路径尾巴：取最后 n 段，斜杠统一成反斜杠', () => {
   assert.equal(tailPathOf('D:/a/b/c', 2), 'b\\c');
   assert.equal(tailPathOf('', 1), '(无工作区)');
 });
+
+test('空白会话不进树，除非它是当前会话', () => {
+  const plan = planTree(
+    [
+      s({ sessionId: 'a', blank: true }),
+      s({ sessionId: 'b', blank: false }),
+      s({ sessionId: 'c', blank: true }),
+    ],
+    'c'
+  );
+  assert.deepEqual(plan.visible.map((x) => x.sessionId).sort(), ['b', 'c']);
+  assert.equal(plan.current.sessionId, 'c');
+  assert.equal(plan.hiddenBlank, 1);
+});

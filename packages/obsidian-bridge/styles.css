@@ -363,3 +363,96 @@
   box-shadow: inset 2px 0 0 var(--interactive-accent);
   font-weight: 600;
 }
+
+.bridge-inject-scope { margin-top: 1.2em; padding-top: .8em; border-top: 1px solid var(--background-modifier-border); }
+.bridge-inject-scope h4 { margin: 0 0 .25em; }
+
+
+.bridge-inject-modal { max-height: 86vh; }
+.bridge-inject-modal .modal-content { max-height: 78vh; overflow-y: auto; }
+
+.bridge-inject-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+  overflow: hidden;
+}
+.bridge-inject-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.bridge-inject-actions {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
+.bridge-inject-modal { width: min(760px, 94vw); }
+.bridge-inject-scopes {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.bridge-inject-scope {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.bridge-inject-scope .setting-item {
+  padding: 8px 0;
+}
+
+.bridge-inject-actions-floating {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 8px 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+.bridge-inject-actions-floating .setting-item-control {
+  gap: 8px;
+}
+
+.bridge-inject-modal { width: min(560px, 92vw); }
+.bridge-inject-modal .modal-content {
+  display: block;
+  max-height: none;
+  overflow: visible;
+}
+.bridge-inject-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 6px;
+}
+.bridge-inject-tab {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.bridge-inject-tab.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+.bridge-inject-actions {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
+.bridge-injected-edit { margin-left: 4px; color: var(--text-muted); background: transparent; border: none; cursor: pointer; }
+.bridge-injected-edit:hover { color: var(--text-normal); }
+.bridge-params-modal { width: min(440px, 92vw); }

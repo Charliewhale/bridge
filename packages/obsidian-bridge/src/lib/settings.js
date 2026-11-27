@@ -13,7 +13,13 @@ const DEFAULTS = {
   chatSessionId: '',
   chatOpen: false,
   injectionEnabled: false,
-  // 注入的节奏：每 injectEvery 轮带一次（1 = 每次都带）；injectTimes 一共带几次（0 = 不限期）
+  // 注入节奏：每 N 轮带一次（1 = 每次都带）；times 一共带几次（0 = 不限期）
+  // 全局和当前会话各有一套，互不影响。
+  globalInjectEvery: 1,
+  globalInjectTimes: 0,
+  sessionInjectEvery: 1,
+  sessionInjectTimes: 0,
+  // 旧字段保留兼容：读旧配置时当 session 的默认值，写回时同步成 session 的值。
   injectEvery: 1,
   injectTimes: 0,
   // 会话转录：把 DSH 会话里"谁说了什么、用过什么工具"写进库里。
@@ -25,6 +31,16 @@ const DEFAULTS = {
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
 const LEVELS = new Set(['read', 'write', 'trust']);
+
+function clampEvery(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 ? Math.min(99, Math.floor(n)) : 1;
+}
+
+function clampTimes(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.min(99, Math.floor(n)) : 0;
+}
 
 function normalizeSettings(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
@@ -41,10 +57,15 @@ function normalizeSettings(raw) {
   const chatSessionId = typeof src.chatSessionId === 'string' ? src.chatSessionId : '';
   const chatOpen = typeof src.chatOpen === 'boolean' ? src.chatOpen : false;
   const injectionEnabled = typeof src.injectionEnabled === 'boolean' ? src.injectionEnabled : false;
-  const rawEvery = Number(src.injectEvery);
-  const injectEvery = Number.isFinite(rawEvery) && rawEvery >= 1 ? Math.min(99, Math.floor(rawEvery)) : 1;
-  const rawTimes = Number(src.injectTimes);
-  const injectTimes = Number.isFinite(rawTimes) && rawTimes > 0 ? Math.min(99, Math.floor(rawTimes)) : 0;
+
+  // 新字段优先；旧配置只有 injectEvery / injectTimes 时，把它当 session 的默认值。
+  const sessionEveryRaw = src.sessionInjectEvery !== undefined ? src.sessionInjectEvery : src.injectEvery;
+  const sessionTimesRaw = src.sessionInjectTimes !== undefined ? src.sessionInjectTimes : src.injectTimes;
+  const sessionInjectEvery = clampEvery(sessionEveryRaw);
+  const sessionInjectTimes = clampTimes(sessionTimesRaw);
+  const globalInjectEvery = clampEvery(src.globalInjectEvery);
+  const globalInjectTimes = clampTimes(src.globalInjectTimes);
+
   const transcript = typeof src.transcript === 'boolean' ? src.transcript : DEFAULTS.transcript;
 
   return {
@@ -58,8 +79,13 @@ function normalizeSettings(raw) {
     chatSessionId,
     chatOpen,
     injectionEnabled,
-    injectEvery,
-    injectTimes,
+    globalInjectEvery,
+    globalInjectTimes,
+    sessionInjectEvery,
+    sessionInjectTimes,
+    // 兼容旧代码/旧界面
+    injectEvery: sessionInjectEvery,
+    injectTimes: sessionInjectTimes,
     transcript,
     tokenTtl,
     tokenIssuedAt,

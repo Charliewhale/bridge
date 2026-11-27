@@ -318,9 +318,9 @@ class BridgeChatView extends ItemView {
 
   // 确保当前库目录在 DSH 里是一个工作区：没有就注册一个（标题用库名）。
   // 不注册的话，从面板新建的会话在 DSH 侧栏里会落进「未分组」。
-  async ensureWorkspace() {
+  async ensureWorkspace(baseOverride = null) {
     try {
-      const base = this.app.vault.adapter.getBasePath();
+      const base = baseOverride || this.app.vault.adapter.getBasePath();
       if (!base) return null;
       const client = this.plugin.connector();
       const res = await client.workspaces();
@@ -337,15 +337,20 @@ class BridgeChatView extends ItemView {
     }
   }
 
-  async createAndBind(targetWorkspaceId = null) {
+  async createAndBind(target = null) {
     const client = this.plugin.connector();
     if (!client.info()) {
       this.pushSystem('连接器未就绪，无法新建会话。');
       return;
     }
     const base = this.app.vault.adapter.getBasePath();
-    // 指定了工作区就用它；否则落到 Obsidian 自己的工作区（库目录）
-    const workspaceId = targetWorkspaceId || (await this.ensureWorkspace());
+    const targetWorkspaceId = typeof target === 'string' ? target : target && target.workspaceId;
+    const targetCwd = target && typeof target === 'object' ? target.cwd : null;
+    // 优先用点中的工作区；没有就按那一组的 cwd 注册/查找；再不行才落到当前库。
+    // 只传 cwd 不注册工作区时，DSH 侧栏会把会话归到「未分组」——所以这里先确保工作区存在。
+    let workspaceId = targetWorkspaceId || null;
+    if (!workspaceId && targetCwd) workspaceId = await this.ensureWorkspace(targetCwd);
+    if (!workspaceId) workspaceId = await this.ensureWorkspace();
     // workspaceId 和 cwd 只能二选一（DSH 会直接拒），工作区自带路径
     const created = await client.createSession(
       workspaceId ? { workspaceId } : base ? { cwd: base } : {}
@@ -534,17 +539,17 @@ class BridgeChatView extends ItemView {
   }
 
   // ── 注入 ─────────────────────────────────────────────────
-  pickNote() {
+  pickNote(scope = 'local') {
     if (!this.plugin.settings.injectionEnabled) {
       this.pushSystem('注入已关闭。到 设置 → 社区插件 → Bridge 里打开「启用注入」。');
       return;
     }
     new NoteTreePickerModal(this.app, (file) => {
-      this.injectFile(file);
+      this.injectFile(file, '', scope);
     }).open();
   }
 
-  async injectCurrentNote() {
+  async injectCurrentNote(scope = 'local') {
     if (!this.plugin.settings.injectionEnabled) {
       this.pushSystem('注入已关闭。到 设置 → 社区插件 → Bridge 里打开「启用注入」。');
       return;
@@ -557,7 +562,7 @@ class BridgeChatView extends ItemView {
     const activeView = this.app.workspace.activeLeaf && this.app.workspace.activeLeaf.view;
     const editor = activeView && activeView.editor;
     const selection = editor && typeof editor.getSelection === 'function' ? editor.getSelection() : '';
-    await this.injectFile(file, selection);
+    await this.injectFile(file, selection, scope);
   }
 
   // 注入面板里选的节奏：每几轮带一次、一共带几次
@@ -600,18 +605,19 @@ class BridgeChatView extends ItemView {
         if (this.usageEl && this.sessionId === sessionId) this.usageEl.setText('上下文 —');
       });
   }
-  cadenceOfInject() {
+  cadenceOfInject(scope = 'local') {
     const s = this.plugin.settings || {};
-    const every = Number(s.injectEvery);
-    const times = Number(s.injectTimes);
+    const global = scope === 'global';
+    const every = Number(global ? s.globalInjectEvery : s.sessionInjectEvery);
+    const times = Number(global ? s.globalInjectTimes : s.sessionInjectTimes);
     return {
       every: Number.isFinite(every) && every >= 1 ? Math.min(99, Math.floor(every)) : 1,
       times: Number.isFinite(times) && times > 0 ? Math.min(99, Math.floor(times)) : 0,
     };
   }
 
-  async injectFile(file, selection = '') {
-    if (!this.sessionId) {
+  async injectFile(file, selection = '', scope = 'local') {
+    if (scope === 'local' && !this.sessionId) {
       this.pushSystem('还没有绑定会话。');
       return;
     }
@@ -621,22 +627,24 @@ class BridgeChatView extends ItemView {
       const base = this.app.vault.adapter.getBasePath();
       const absPath = base ? String(base).replace(/[\\/]+$/, '') + '/' + file.path : null;
       const res = await this.plugin.connector().inject({
-        sessionId: this.sessionId,
+        scope,
+        sessionId: scope === 'local' ? this.sessionId : undefined,
         path: file.path,
         absPath,
         content: selection || '',
         title: file.path,
         kind: 'note',
         // 节奏：每 every 轮带一次；times 一共带几次（0 = 不限期）
-        ...this.cadenceOfInject(),
+        ...this.cadenceOfInject(scope),
       });
       if (res && res.ok) {
         const extra = selection ? `（另附选中 ${selection.length} 字）` : '';
-        const { every, times } = this.cadenceOfInject();
+        const { every, times } = this.cadenceOfInject(scope);
         const life =
           (every === 1 ? '每轮都带' : `每 ${every} 轮带一次`) +
           (times === 0 ? '，不限次数' : `，共 ${times} 次`);
-        this.pushSystem(`已注入《${file.path}》${extra}——${life}，实时跟随磁盘内容。`);
+        const where = scope === 'global' ? '全局' : '当前会话';
+        this.pushSystem(`已注入《${file.path}》${extra}——${where}，${life}，实时跟随磁盘内容。`);
         this.refreshRemoteState();
       } else {
         this.pushSystem('注入失败：' + ((res && res.error && res.error.message) || '未知原因'));
@@ -820,10 +828,513 @@ class InjectionPanelModal extends Modal {
     super(app);
     this.plugin = plugin;
     this.view = view;
+    this.baseline = null;
+    this.draft = null;
+    this.dirty = false;
+    this.busy = false;
+    this.activeScope = 'global';
+    this.applyBtn = null;
+    this.cancelBtn = null;
+    this.lists = {};
+    this.statusEl = null;
+    this.dirtyEl = null;
   }
 
   onOpen() {
     this.modalEl.addClass('bridge-inject-modal');
+    this.load()
+      .catch(() => {})
+      .finally(() => this.render());
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+
+  clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  normalizeItem(item) {
+    return {
+      id: String(item.id || ''),
+      scope: item.scope === 'global' ? 'global' : 'local',
+      sessionId: item.sessionId || (item.scope === 'global' ? '*' : ''),
+      title: item.title || null,
+      path: item.path || null,
+      absPath: item.absPath || null,
+      every: Number(item.every) || 1,
+      times: Number(item.times) || 0,
+      used: Number(item.used) || 0,
+      remaining: Number(item.remaining) || 0,
+      length: Number(item.length) || 0,
+      content: '',
+    };
+  }
+
+  async load() {
+    const client = this.plugin.connector();
+    let enabled = this.plugin.settings.injectionEnabled === true;
+    let items = [];
+    try {
+      const cfg = await client.config();
+      if (cfg && cfg.ok === true && cfg.data) enabled = cfg.data.injection === true;
+    } catch {
+      /* 连接器离线就用本地缓存，不阻断面板打开 */
+    }
+    try {
+      const res = await client.injectStatus(this.view.sessionId);
+      if (res && res.ok === true && Array.isArray(res.data.current)) {
+        items = res.data.current.map((x) => this.normalizeItem(x));
+      }
+    } catch {
+      /* 同上 */
+    }
+    const globalItems = items.filter((x) => x.scope === 'global');
+    const localItems = items.filter((x) => x.scope !== 'global');
+    const s = this.plugin.settings;
+    const pick = (list, every, times) =>
+      list.length ? { every: list[0].every, times: list[0].times } : { every, times };
+    this.baseline = {
+      enabled,
+      global: pick(globalItems, s.globalInjectEvery, s.globalInjectTimes),
+      session: pick(localItems, s.sessionInjectEvery, s.sessionInjectTimes),
+      items: items.map((x) => ({ ...x })),
+    };
+    this.draft = this.clone(this.baseline);
+    this.dirty = false;
+  }
+
+  snapshotKey(d) {
+    if (!d) return '';
+    const items = (d.items || [])
+      .map((x) => [x.scope, x.sessionId || '', x.path || '', x.title || '', x.every, x.times, x.content || ''].join('|'))
+      .sort();
+    return JSON.stringify({
+      enabled: d.enabled === true,
+      global: [d.global.every, d.global.times],
+      session: [d.session.every, d.session.times],
+      items,
+    });
+  }
+
+  markDirty() {
+    this.dirty = this.snapshotKey(this.baseline) !== this.snapshotKey(this.draft);
+    if (this.dirtyEl) this.dirtyEl.setText(this.dirty ? '有未应用的改动' : '');
+    this.updateButtons();
+  }
+
+  updateButtons() {
+    const disabled = !this.dirty || this.busy;
+    if (this.applyBtn) this.applyBtn.setDisabled(disabled);
+    if (this.cancelBtn) this.cancelBtn.setDisabled(disabled);
+  }
+
+  render() {
+    const c = this.contentEl;
+    c.empty();
+    c.createEl('h3', { text: '注入' });
+    c.createEl('p', {
+      text: '改动暂存，应用后写入连接器。',
+      cls: 'setting-item-description',
+    });
+    if (!this.draft) {
+      c.createEl('p', { text: '读取注入状态失败，请先确认连接器在线。' });
+      return;
+    }
+
+    this.statusEl = c.createDiv({
+      cls: 'bridge-line',
+      text: `连接器：${this.baseline.enabled ? '开' : '关'}`,
+    });
+    this.dirtyEl = c.createDiv({ cls: 'bridge-line bridge-dirty', text: '' });
+
+    new Setting(c)
+      .setName('启用注入')
+      .addToggle((t) =>
+        t.setValue(this.draft.enabled).onChange((v) => {
+          this.draft.enabled = v;
+          this.markDirty();
+        }),
+      );
+
+    const tabs = c.createDiv({ cls: 'bridge-inject-tabs' });
+    for (const [scope, label] of [['global', '全局'], ['local', '当前会话']]) {
+      const btn = tabs.createEl('button', {
+        cls: 'bridge-inject-tab' + (this.activeScope === scope ? ' is-active' : ''),
+        text: label,
+      });
+      btn.onClickEvent(() => {
+        this.activeScope = scope;
+        this.render();
+      });
+    }
+
+    this.lists = {};
+    if (this.activeScope === 'local') {
+      this.renderScope(c, 'local', '当前会话注入', '仅当前会话。');
+    } else {
+      this.renderScope(c, 'global', '全局注入', '所有会话可用；上限跨会话累计。');
+    }
+
+    const bar = new Setting(c);
+    bar.settingEl.addClass('bridge-inject-actions');
+    bar
+      .addButton((b) => {
+        this.applyBtn = b;
+        b.setButtonText('应用').setCta().onClick(() => this.apply());
+      })
+      .addButton((b) => {
+        this.cancelBtn = b;
+        b.setButtonText('取消').onClick(() => this.cancel());
+      });
+    this.updateButtons();
+  }
+
+  renderScope(c, scope, title, desc) {
+    const box = c.createDiv({ cls: 'bridge-inject-scope' });
+    box.createEl('h4', { text: title });
+    box.createEl('p', { text: desc, cls: 'setting-item-description' });
+    this.lists[scope] = box.createDiv({ cls: 'bridge-injected-list' });
+    this.renderCadence(box, scope);
+    new Setting(box)
+      .addButton((b) =>
+        b.setButtonText('注入当前笔记').onClick(() => this.addCurrentNote(scope)),
+      )
+      .addButton((b) =>
+        b.setButtonText('选择笔记…').onClick(() => this.pickNote(scope)),
+      )
+      .addButton((b) =>
+        b.setButtonText('清除本区').onClick(() => this.clearScope(scope)),
+      );
+    this.renderList(scope);
+  }
+
+  renderCadence(c, scope) {
+    const settingsKey = scope === 'global' ? 'global' : 'session';
+    const cadence = this.draft[settingsKey];
+    const describeEvery = (n) => (n === 1 ? '每轮都带' : '每 ' + n + ' 轮带一次');
+    const describeTimes = (n) => (n === 0 ? '不限期' : '共 ' + n + ' 次');
+    let everyInput = null;
+    let timesInput = null;
+    let everyDrop = null;
+    let timesDrop = null;
+
+    new Setting(c)
+      .setName('注入间隔')
+      .setDesc('每 N 轮带一次')
+      .addDropdown((dd) => {
+        everyDrop = dd;
+        return dd
+          .addOption('1', '每轮都带')
+          .addOption('2', '每 2 轮')
+          .addOption('3', '每 3 轮')
+          .addOption('5', '每 5 轮')
+          .addOption('custom', '自定义…')
+          .setValue([1, 2, 3, 5].includes(cadence.every) ? String(cadence.every) : 'custom')
+          .onChange((v) => {
+            if (v === 'custom') {
+              if (everyInput && !String(everyInput.getValue() || '').trim()) {
+                everyInput.setValue(String(cadence.every > 1 ? cadence.every : 3));
+              }
+              return;
+            }
+            this.setCadence(scope, 'every', v);
+            if (everyInput) everyInput.setValue('');
+            new Notice('注入间隔：' + describeEvery(this.draft[settingsKey].every) + '（待应用）');
+          });
+      })
+      .addText((txt) => {
+        everyInput = txt;
+        if (![1, 2, 3, 5].includes(cadence.every)) txt.setValue(String(cadence.every));
+        txt.setPlaceholder('自定义 1-99').onChange((raw) => {
+          const s = String(raw == null ? '' : raw).trim();
+          if (!s) return;
+          if (everyDrop) everyDrop.setValue('custom');
+          this.setCadence(scope, 'every', s);
+          new Notice('注入间隔：' + describeEvery(this.draft[settingsKey].every) + '（待应用）');
+        });
+      });
+
+    new Setting(c)
+      .setName('注入次数')
+      .setDesc('0 = 不限期')
+      .addDropdown((dd) => {
+        timesDrop = dd;
+        return dd
+          .addOption('0', '不限期')
+          .addOption('1', '只带 1 次')
+          .addOption('3', '共 3 次')
+          .addOption('5', '共 5 次')
+          .addOption('custom', '自定义…')
+          .setValue([0, 1, 3, 5].includes(cadence.times) ? String(cadence.times) : 'custom')
+          .onChange((v) => {
+            if (v === 'custom') {
+              if (timesInput && !String(timesInput.getValue() || '').trim()) {
+                timesInput.setValue(String(cadence.times > 0 ? cadence.times : 3));
+              }
+              return;
+            }
+            this.setCadence(scope, 'times', v);
+            if (timesInput) timesInput.setValue('');
+            new Notice('注入次数：' + describeTimes(this.draft[settingsKey].times) + '（待应用）');
+          });
+      })
+      .addText((txt) => {
+        timesInput = txt;
+        if (![0, 1, 3, 5].includes(cadence.times)) txt.setValue(String(cadence.times));
+        txt.setPlaceholder('自定义 0-99').onChange((raw) => {
+          const s = String(raw == null ? '' : raw).trim();
+          if (!s) return;
+          if (timesDrop) timesDrop.setValue('custom');
+          this.setCadence(scope, 'times', s);
+          new Notice('注入次数：' + describeTimes(this.draft[settingsKey].times) + '（待应用）');
+        });
+      });
+  }
+
+  setCadence(scope, key, raw) {
+    const settingsKey = scope === 'global' ? 'global' : 'session';
+    const n = Number(raw);
+    if (key === 'every') {
+      this.draft[settingsKey].every = Number.isFinite(n) && n >= 1 ? Math.min(99, Math.floor(n)) : 1;
+    } else {
+      this.draft[settingsKey].times = Number.isFinite(n) && n > 0 ? Math.min(99, Math.floor(n)) : 0;
+    }
+    this.markDirty();
+    this.renderList('global');
+    this.renderList('local');
+  }
+
+  itemsFor(scope) {
+    return this.draft.items.filter((x) => x.scope === scope);
+  }
+
+  renderList(scope) {
+    const el = this.lists[scope];
+    if (!el) return;
+    el.empty();
+    const globalItems = this.itemsFor('global');
+    const localItems = this.itemsFor('local');
+    const inherited = scope === 'local' ? globalItems : [];
+    const own = scope === 'local' ? localItems : globalItems;
+    const total = own.length + inherited.length;
+    if (total === 0) {
+      el.setText('已注入：无');
+      return;
+    }
+    if (scope === 'local') {
+      el.createDiv({
+        cls: 'bridge-line',
+        text: `全局 ${inherited.length} · 本会话 ${own.length}`,
+      });
+    } else {
+      el.createDiv({ cls: 'bridge-line', text: `已注入 ${own.length} 篇：` });
+    }
+    const rows = [
+      ...inherited.map((item) => ({ item, source: '全局', removable: false })),
+      ...own.map((item) => ({ item, source: scope === 'local' ? '本会话' : '', removable: true })),
+    ];
+    for (const { item, source, removable } of rows) {
+      const row = el.createDiv({ cls: 'bridge-injected-item' });
+      row.createSpan({
+        cls: 'bridge-injected-name',
+        text:
+          `《${item.title || '（无标题）'}》 · ${source ? source + ' · ' : ''}${item.length || 0} 字` +
+          (Number(item.every) > 1 ? ` · 每 ${item.every} 轮` : '') +
+          (Number(item.times) > 0 ? ` · 共 ${item.times} 次` : ''),
+      });
+      if (removable) {
+        const edit = row.createEl('button', {
+          cls: 'bridge-injected-edit',
+          text: '✎',
+          attr: { 'aria-label': '编辑这篇的间隔和次数', title: '编辑间隔和次数' },
+        });
+        edit.onClickEvent(() => this.editItem(item.id));
+        const x = row.createEl('button', {
+          cls: 'bridge-injected-x',
+          text: '×',
+          attr: { 'aria-label': '移除这篇', title: '移除这篇' },
+        });
+        x.onClickEvent(() => this.removeItem(item.id));
+      }
+    }
+  }
+
+  editItem(id) {
+    const item = this.draft.items.find((x) => x.id === id);
+    if (!item) return;
+    new InjectionParamsModal(this.app, {
+      title: '编辑注入参数',
+      every: item.every,
+      times: item.times,
+      onSave: (every, times) => {
+        item.every = every;
+        item.times = times;
+        item.remaining = times > 0 ? Math.max(0, times - (Number(item.used) || 0)) : 0;
+        this.markDirty();
+        this.renderList('global');
+        this.renderList('local');
+      },
+    }).open();
+  }
+
+  removeItem(id) {
+    this.draft.items = this.draft.items.filter((x) => x.id !== id);
+    this.markDirty();
+    this.renderList('global');
+    this.renderList('local');
+  }
+
+  clearScope(scope) {
+    this.draft.items = this.draft.items.filter((x) => x.scope !== scope);
+    this.markDirty();
+    this.renderList('global');
+    this.renderList('local');
+  }
+
+  addCurrentNote(scope) {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice('当前没有打开的笔记');
+      return;
+    }
+    const activeView = this.app.workspace.activeLeaf && this.app.workspace.activeLeaf.view;
+    const editor = activeView && activeView.editor;
+    const selection = editor && typeof editor.getSelection === 'function' ? editor.getSelection() : '';
+    const base = this.draft[scope === 'global' ? 'global' : 'session'];
+    new InjectionParamsModal(this.app, {
+      title: '注入当前笔记',
+      every: base.every,
+      times: base.times,
+      onSave: (every, times) => this.addFile(file, selection, scope, every, times),
+    }).open();
+  }
+
+  pickNote(scope) {
+    const base = this.draft[scope === 'global' ? 'global' : 'session'];
+    new NoteTreePickerModal(
+      this.app,
+      (file, every, times) => this.addFile(file, '', scope, every, times),
+      { every: base.every, times: base.times },
+    ).open();
+  }
+
+  addFile(file, selection, scope, every = null, times = null) {
+    const base = this.app.vault.adapter.getBasePath();
+    const absPath = base ? String(base).replace(/[\\/]+$/, '') + '/' + file.path : null;
+    const title = file.path;
+    const idx = this.draft.items.findIndex((x) => x.scope === scope && x.title === title);
+    const existing = idx >= 0 ? this.draft.items[idx] : null;
+    const settingsKey = scope === 'global' ? 'global' : 'session';
+    const baseParams = this.draft[settingsKey];
+    const normalizedEvery = Number.isFinite(Number(every)) && Number(every) >= 1
+      ? Math.min(99, Math.floor(Number(every)))
+      : baseParams.every;
+    const normalizedTimes = Number.isFinite(Number(times)) && Number(times) > 0
+      ? Math.min(99, Math.floor(Number(times)))
+      : 0;
+    const item = {
+      id: existing ? existing.id : 'draft-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      scope,
+      sessionId: scope === 'global' ? '*' : this.view.sessionId,
+      title,
+      path: file.path,
+      absPath,
+      every: normalizedEvery,
+      times: normalizedTimes,
+      used: existing ? existing.used : 0,
+      remaining: normalizedTimes > 0 ? Math.max(0, normalizedTimes - (existing ? existing.used : 0)) : 0,
+      length: (selection || '').length,
+      content: selection || '',
+    };
+    if (idx >= 0) this.draft.items[idx] = item;
+    else this.draft.items.push(item);
+    this.markDirty();
+    this.renderList('global');
+    this.renderList('local');
+  }
+
+  cancel() {
+    if (!this.dirty || this.busy) return;
+    this.draft = this.clone(this.baseline);
+    this.dirty = false;
+    this.render();
+    new Notice('已取消，回到打开面板时的状态');
+  }
+
+  async apply() {
+    if (!this.dirty || this.busy) return;
+    this.busy = true;
+    this.updateButtons();
+    const client = this.plugin.connector();
+    try {
+      const cfg = await client.setInjection(this.draft.enabled);
+      if (!cfg || cfg.ok !== true) throw new Error('启用状态同步失败');
+
+      const s = this.plugin.settings;
+      s.globalInjectEvery = this.draft.global.every;
+      s.globalInjectTimes = this.draft.global.times;
+      s.sessionInjectEvery = this.draft.session.every;
+      s.sessionInjectTimes = this.draft.session.times;
+      await this.plugin.saveSettings();
+
+      const baseById = new Map(this.baseline.items.map((x) => [x.id, x]));
+      const draftIds = new Set(this.draft.items.map((x) => x.id));
+      for (const old of this.baseline.items) {
+        if (!draftIds.has(old.id)) await client.clearInjection(old.id);
+      }
+      for (const item of this.draft.items) {
+        const old = baseById.get(item.id);
+        const changed = !old || old.every !== item.every || old.times !== item.times || (item.content || '') !== (old.content || '');
+        if (!changed) continue;
+        if (old) await client.clearInjection(old.id);
+        const res = await client.inject({
+          scope: item.scope,
+          sessionId: item.scope === 'local' ? this.view.sessionId : undefined,
+          path: item.path,
+          absPath: item.absPath,
+          content: item.content || '',
+          title: item.title,
+          kind: 'note',
+          every: item.every,
+          times: item.times,
+        });
+        if (!res || res.ok !== true) {
+          throw new Error('同步注入项失败：' + ((res && res.error && res.error.message) || '未知原因'));
+        }
+      }
+
+      const refreshed = await client.refreshInjection(this.view.sessionId);
+      await this.load();
+      this.busy = false;
+      this.render();
+      new Notice(
+        refreshed && refreshed.ok === true
+          ? '已应用；下一条消息会立即带上注入'
+          : '已应用；连接器未升级，重启 DSH 后「立即带一次」才会生效',
+      );
+    } catch (err) {
+      this.busy = false;
+      this.updateButtons();
+      new Notice('应用失败：' + String((err && err.message) || err));
+      await this.load();
+      this.render();
+    }
+  }
+}
+
+class InjectionParamsModal extends Modal {
+  constructor(app, { title = '注入参数', every = 1, times = 0, onSave = null } = {}) {
+    super(app);
+    this.title = title;
+    this.every = Number(every) || 1;
+    this.times = Number(times) || 0;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    this.modalEl.addClass('bridge-params-modal');
     this.render();
   }
 
@@ -834,239 +1345,54 @@ class InjectionPanelModal extends Modal {
   render() {
     const c = this.contentEl;
     c.empty();
-    c.createEl('h3', { text: '注入' });
-    c.createEl('p', {
-      text: '把笔记内容送进 DSH 的系统提示词段（不进对话历史）。开关与 DSH 连接器双向同步。',
-      cls: 'setting-item-description',
-    });
-    this.statusEl = c.createDiv({ cls: 'bridge-line', text: '读取中…' });
-    this.injectedEl = c.createDiv({ cls: 'bridge-injected-list', text: '已注入：—' });
-
-    new Setting(c)
-      .setName('启用注入')
-      .setDesc('关闭时不注册上下文段，DSH 不会看到任何注入内容')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.injectionEnabled).onChange(async (v) => {
-          this.plugin.settings.injectionEnabled = v;
-          await this.plugin.saveSettings();
-          const res = await this.plugin.connector().setInjection(v);
-          new Notice(res && res.ok ? (v ? '注入已开启（已同步）' : '注入已关闭（已同步）') : '本地已切换；连接器未同步');
-          this.refreshStatus();
-        }),
-      );
-
-    const cadence = this.view.cadenceOfInject();
-    const describeEvery = (n) => (n === 1 ? '每轮都带' : '每 ' + n + ' 轮带一次');
-    const describeTimes = (n) => (n === 0 ? '不限期' : '共 ' + n + ' 次');
-    let everyInput = null;
-    let timesInput = null;
-    let everyDrop = null;
-    let timesDrop = null;
-
+    c.createEl('h3', { text: this.title });
     new Setting(c)
       .setName('注入间隔')
-      .setDesc('每几轮带一次。正文会跟着系统提示词重发，间隔越大越省上下文')
-      .addDropdown((dd) => {
-        everyDrop = dd;
-        return dd
-          .addOption('1', '每轮都带')
-          .addOption('2', '每 2 轮')
-          .addOption('3', '每 3 轮')
-          .addOption('5', '每 5 轮')
-          .addOption('custom', '自定义…')
-          .setValue([1, 2, 3, 5].includes(cadence.every) ? String(cadence.every) : 'custom')
-          .onChange(async (v) => {
-            if (v === 'custom') {
-              // 框里已经有数就别覆盖它（那是主人刚敲的）
-              if (everyInput && !String(everyInput.getValue() || '').trim()) {
-                everyInput.setValue(String(cadence.every > 1 ? cadence.every : 3));
-              }
-              return;
-            }
-            this.plugin.settings.injectEvery = Number(v) || 1;
-            if (everyInput) everyInput.setValue('');
-            await this.plugin.saveSettings();
-            new Notice('注入间隔：' + describeEvery(this.plugin.settings.injectEvery));
-          });
-      })
-      .addText((txt) => {
-        everyInput = txt;
-        txt.setPlaceholder('自定义 1-99').onChange(async (raw) => {
-          const s = String(raw == null ? '' : raw).trim();
-          if (!s) return;
-          // 手动填了数就说明用的是自定义档位，左边的下拉跟着切过去
-          if (everyDrop) everyDrop.setValue('custom');
-          const n = Number(s);
-          this.plugin.settings.injectEvery = Number.isFinite(n) && n >= 1 ? Math.min(99, Math.floor(n)) : 1;
-          await this.plugin.saveSettings();
-          new Notice('注入间隔：' + describeEvery(this.plugin.settings.injectEvery));
-        });
-      });
-
+      .setDesc('每 N 轮带一次')
+      .addText((t) =>
+        t
+          .setValue(String(this.every))
+          .setPlaceholder('1-99')
+          .onChange((v) => {
+            const n = Number(v);
+            this.every = Number.isFinite(n) && n >= 1 ? Math.min(99, Math.floor(n)) : 1;
+          }),
+      );
     new Setting(c)
       .setName('注入次数')
-      .setDesc('一共带几次；0 或留空表示不限期（手动清除为止）')
-      .addDropdown((dd) => {
-        timesDrop = dd;
-        return dd
-          .addOption('0', '不限期')
-          .addOption('1', '只带 1 次')
-          .addOption('3', '共 3 次')
-          .addOption('5', '共 5 次')
-          .addOption('custom', '自定义…')
-          .setValue([0, 1, 3, 5].includes(cadence.times) ? String(cadence.times) : 'custom')
-          .onChange(async (v) => {
-            if (v === 'custom') {
-              if (timesInput && !String(timesInput.getValue() || '').trim()) {
-                timesInput.setValue(String(cadence.times > 0 ? cadence.times : 3));
-              }
-              return;
-            }
-            this.plugin.settings.injectTimes = Number(v) || 0;
-            if (timesInput) timesInput.setValue('');
-            await this.plugin.saveSettings();
-            new Notice('注入次数：' + describeTimes(this.plugin.settings.injectTimes));
-          });
-      })
-      .addText((txt) => {
-        timesInput = txt;
-        txt.setPlaceholder('自定义 0-99').onChange(async (raw) => {
-          const s = String(raw == null ? '' : raw).trim();
-          if (!s) return;
-          // 手动填了数就说明用的是自定义档位，左边的下拉跟着切过去
-          if (timesDrop) timesDrop.setValue('custom');
-          const n = Number(s);
-          this.plugin.settings.injectTimes = Number.isFinite(n) && n > 0 ? Math.min(99, Math.floor(n)) : 0;
-          await this.plugin.saveSettings();
-          new Notice('注入次数：' + describeTimes(this.plugin.settings.injectTimes));
-        });
-      });
-
+      .setDesc('0 = 不限期')
+      .addText((t) =>
+        t
+          .setValue(String(this.times))
+          .setPlaceholder('0-99')
+          .onChange((v) => {
+            const n = Number(v);
+            this.times = Number.isFinite(n) && n > 0 ? Math.min(99, Math.floor(n)) : 0;
+          }),
+      );
     new Setting(c)
+      .addButton((b) => b.setButtonText('取消').onClick(() => this.close()))
       .addButton((b) =>
-        b.setButtonText('注入当前笔记').setCta().onClick(async () => {
-          await this.view.injectCurrentNote();
-          this.refreshStatus();
-        }),
-      )
-      .addButton((b) =>
-        b.setButtonText('选择笔记…').onClick(() => {
-          new NoteTreePickerModal(this.app, async (file) => {
-            await this.view.injectFile(file);
-            this.refreshStatus();
-          }).open();
-        }),
-      )
-      .addButton((b) =>
-        b.setButtonText('清除注入').onClick(async () => {
-          const res = await this.plugin.connector().clearInjection();
-          new Notice(res && res.ok ? '已清除注入' : '清除失败');
-          this.refreshStatus();
+        b.setButtonText('保存').setCta().onClick(() => {
+          this.close();
+          try {
+            this.onSave?.(this.every, this.times);
+          } catch {
+            /* 回调异常不外抛 */
+          }
         }),
       );
-
-    this.syncOnce();
-    this.refreshStatus();
-  }
-
-  syncOnce() {
-    // 连接器是唯一真相源：面板只读它、把本地缓存对齐过去。
-    // 以前这里是反方向（本地 → 连接器），结果设置页和面板谁后开谁赢，
-    // 会静默改掉主人刚设的开关。
-    if (this._synced) return;
-    this._synced = true;
-    const client = this.plugin.connector();
-    if (!client.info()) return;
-    client
-      .config()
-      .then(async (res) => {
-        if (!res || res.ok !== true) return;
-        const state = reconcileInjection({
-          remote: res.data && res.data.injection,
-          local: this.plugin.settings.injectionEnabled,
-        });
-        if (state.changed) {
-          this.plugin.settings.injectionEnabled = state.value;
-          await this.plugin.saveSettings();
-        }
-        this.refreshStatus();
-      })
-      .catch(() => {});
-  }
-
-  refreshStatus() {
-    const client = this.plugin.connector();
-    if (!client.info()) {
-      if (this.statusEl) this.statusEl.setText('连接器：离线');
-      return;
-    }
-    client
-      .injectStatus()
-      .then((res) => {
-        if (!this.statusEl) return;
-        if (!res || res.ok !== true) {
-          this.statusEl.setText('读不到注入状态');
-          return;
-        }
-        const on = res.data.injection === true;
-        const cur = res.data.current;
-        this.statusEl.setText(`连接器：${on ? '开' : '关'}`);
-        const items = Array.isArray(cur) ? cur : cur ? [cur] : [];
-        // 旧版连接器回执里没有 turns 字段：说明「带几轮」在那边不生效，
-        // 界面得直说，不然你以为只带一次、其实每轮都在发。
-        const cadenceKnown = items.every((x) => Object.prototype.hasOwnProperty.call(x, 'every'));
-        if (this.injectedEl) {
-          this.injectedEl.empty();
-          if (items.length === 0) {
-            this.injectedEl.setText('已注入：无');
-          } else {
-            this.injectedEl.createDiv({
-              cls: 'bridge-line',
-              text: `已注入 ${items.length} 篇：` + (cadenceKnown ? '' : '（连接器未升级，节奏不生效）'),
-            });
-            for (const item of items) {
-              const row = this.injectedEl.createDiv({ cls: 'bridge-injected-item' });
-              row.createSpan({
-                cls: 'bridge-injected-name',
-                text:
-                  `《${item.title || '（无标题）'}》 · ${item.length} 字` +
-                  (Number(item.every) > 1 ? ` · 每 ${item.every} 轮` : '') +
-                  (Number(item.times) > 0 ? ` · 剩 ${Math.max(0, Number(item.remaining) || 0)} 次` : ''),
-              });
-              const x = row.createEl('button', {
-                cls: 'bridge-injected-x',
-                text: '×',
-                attr: { 'aria-label': '移除这篇', title: '移除这篇' },
-              });
-              x.onClickEvent(async () => {
-                await this.plugin.connector().clearInjection(item.id);
-                this.refreshStatus();
-              });
-            }
-            const clearAll = this.injectedEl.createEl('button', {
-              cls: 'bridge-injected-clearall',
-              text: '全部清除',
-            });
-            clearAll.onClickEvent(async () => {
-              const res = await this.plugin.connector().clearInjection();
-              new Notice(res && res.ok ? '已清除全部注入' : '清除失败');
-              this.refreshStatus();
-            });
-          }
-        }
-      })
-      .catch(() => {
-        if (this.statusEl) this.statusEl.setText('读不到注入状态');
-      });
   }
 }
 
 class NoteTreePickerModal extends Modal {
-  constructor(app, onPick) {
+  constructor(app, onPick, defaults = {}) {
     super(app);
     this.onPick = onPick;
     this.expanded = new Set();
     this.selectedPath = null;
+    this.every = Number(defaults.every) || 1;
+    this.times = Number(defaults.times) || 0;
   }
 
   onOpen() {
@@ -1090,11 +1416,58 @@ class NoteTreePickerModal extends Modal {
   render() {
     const c = this.contentEl;
     c.empty();
-    c.createEl('h3', { text: '选择要注入的笔记' });
-    const hint = c.createDiv({ cls: 'setting-item-description', text: '文件夹可展开/收起；点笔记即注入。' });
+    c.createEl('h3', { text: '添加注入' });
+    c.createDiv({ cls: 'setting-item-description', text: '选一篇笔记，再设这篇自己的间隔和次数。' });
     this.treeEl = c.createDiv({ cls: 'bridge-tree' });
+    this.treeEl.style.maxHeight = '44vh';
+    this.treeEl.style.overflowY = 'auto';
     const root = this.app.vault.getRoot();
     this.renderFolder(root, this.treeEl, 0);
+
+    new Setting(c)
+      .setName('注入间隔')
+      .setDesc('每 N 轮带一次')
+      .addText((t) =>
+        t
+          .setValue(String(this.every))
+          .setPlaceholder('1-99')
+          .onChange((v) => {
+            const n = Number(v);
+            this.every = Number.isFinite(n) && n >= 1 ? Math.min(99, Math.floor(n)) : 1;
+          }),
+      );
+    new Setting(c)
+      .setName('注入次数')
+      .setDesc('0 = 不限期')
+      .addText((t) =>
+        t
+          .setValue(String(this.times))
+          .setPlaceholder('0-99')
+          .onChange((v) => {
+            const n = Number(v);
+            this.times = Number.isFinite(n) && n > 0 ? Math.min(99, Math.floor(n)) : 0;
+          }),
+      );
+
+    new Setting(c)
+      .addButton((b) => b.setButtonText('取消').onClick(() => this.close()))
+      .addButton((b) =>
+        b.setButtonText('添加').setCta().onClick(() => this.confirm()),
+      );
+  }
+
+  confirm() {
+    const file = this.selectedPath ? this.app.vault.getAbstractFileByPath(this.selectedPath) : null;
+    if (!file) {
+      new Notice('先选一篇笔记');
+      return;
+    }
+    this.close();
+    try {
+      this.onPick?.(file, this.every, this.times);
+    } catch {
+      /* 回调异常不外抛 */
+    }
   }
 
   sortedChildren(folder) {
@@ -1128,15 +1501,13 @@ class NoteTreePickerModal extends Modal {
       const row = parentEl.createDiv({
         cls: 'bridge-tree-row bridge-tree-file' + (selected ? ' is-selected' : ''),
       });
+      row.dataset.path = child.path;
       row.style.paddingLeft = depth * 14 + 16 + 'px';
       row.createSpan({ cls: 'bridge-tree-name', text: child.basename || child.name });
       row.onClickEvent(() => {
-        this.close();
-        try {
-          this.onPick(child);
-        } catch {
-          /* 回调异常不外抛 */
-        }
+        this.selectedPath = child.path;
+        const rows = this.treeEl.querySelectorAll('.bridge-tree-file');
+        for (const el of rows) el.toggleClass('is-selected', el.dataset.path === child.path);
       });
     }
   }
@@ -1187,12 +1558,16 @@ class SessionTreeModal extends Modal {
     // 按 cwd 分会多出 DSH 界面里根本没有的「工作区」，两边对不上。
     // 归档会话在 DSH 里也不显示，这里一并过滤。
     const plan = planTree(this.sessions, this.currentId);
-    const { groups, visible, archivedCount } = plan;
+    const { groups, visible, archivedCount, hiddenBlank } = plan;
+    const hidden = [
+      archivedCount ? `${archivedCount} 个归档` : '',
+      hiddenBlank ? `${hiddenBlank} 个空白会话` : '',
+    ].filter(Boolean).join('、');
     c.createDiv({
       cls: 'setting-item-description',
       text:
         `共 ${groups.size} 个工作区 · ${visible.length} 个会话` +
-        (archivedCount ? `（已隐藏 ${archivedCount} 个归档）` : '') +
+        (hidden ? `（已隐藏 ${hidden}）` : '') +
         '。点工作区展开，点会话切换。',
     });
 
@@ -1213,14 +1588,18 @@ class SessionTreeModal extends Modal {
         this.render();
       });
       if (!open) continue;
-      // 这个工作区下也可以直接新建（不用回面板点「新建会话」）
+      // 这个工作区下也可以直接新建（不用回面板点「新建会话」）。
+      // 组里旧会话可能没有 workspaceId，所以把这一组的 cwd 也带上，
+      // 让 createAndBind 去注册/查找这个 cwd 的工作区，而不是退回当前库。
       const wsId = rows.find((x) => x.workspaceId)?.workspaceId || null;
+      // 别叫 cwd：外层 for 的分组键就叫 cwd，同名会把它遮住并触发 TDZ。
+      const groupCwd = rows.find((x) => x.cwd)?.cwd || null;
       const addRow = tree.createDiv({ cls: 'bridge-tree-row bridge-tree-new' });
       addRow.style.paddingLeft = '20px';
       addRow.createSpan({ cls: 'bridge-tree-name', text: '＋ 在此工作区新建会话' });
       addRow.onClickEvent(() => {
         this.close();
-        try { this.onNew(wsId); } catch { /* ignore */ }
+        try { this.onNew({ workspaceId: wsId, cwd: groupCwd }); } catch { /* ignore */ }
       });
       for (const s of rows) {
         const active = s.sessionId === this.currentId;
