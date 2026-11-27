@@ -78,7 +78,7 @@ test('显式 file=null 时 append 不落盘也不报错（默认落标准路径�
 test('账本写失败通过 onError 报出来，不静默丢', () => {
   const seen = [];
   const ledger = createLedger({
-    file: 'Z:\\no-such-drive\\ledger.jsonl',
+    file: unwritableFile(),
     onError: (err) => seen.push(err),
   });
 
@@ -88,7 +88,18 @@ test('账本写失败通过 onError 报出来，不静默丢', () => {
 });
 
 test('没给 onError 时写失败也不炸，且 read 仍返回空', () => {
-  const ledger = createLedger({ file: 'Z:\\no-such-drive\\ledger.jsonl' });
+  const ledger = createLedger({ file: unwritableFile() });
   assert.doesNotThrow(() => ledger.append({ type: 'deliver', round: 1 }));
   assert.deepEqual(ledger.read(), []);
 });
+
+// 跨平台的「写不进去」：先建一个普通文件，再让路径穿过它，
+// 在文件底下建目录，Windows 和 Linux 都报 ENOTDIR。
+// 别用 Z: 这种盘符：Linux 上反斜杠只是文件名字符，会真的写成功。
+function unwritableFile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inj-bad-"));
+  const blocker = path.join(dir, "blocker");
+  fs.writeFileSync(blocker, "x", "utf8");
+  return path.join(blocker, "ledger.jsonl");
+}
+
