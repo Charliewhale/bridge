@@ -1,5 +1,9 @@
 // Bridge 连接器 · 当前注入（进系统提示词段，可多篇）。
 //
+// 两种范围：
+//   global —— 所有 DSH 会话都能带（局部节流按每个会话自己的轮次算，总上限跨会话累计）
+//   local  —— 只对注入时绑定的那个会话生效
+//
 // 两种形态：
 //   ① 路径注入（首选）：只记 path + absPath，每轮组装时按 mtime/size 读磁盘最新内容。
 //      笔记改了，注入跟着变——这是「实时跟随」，不是拍快照。
@@ -8,7 +12,8 @@
 // 频率由两个数决定（见 injection-schedule.mjs）：
 //   every —— 每几轮带一次（1 = 每次都带）
 //   times —— 一共带几次（0 = 不限期）
-// 「第几轮」按会话算：每次投递 beginDelivery 一次，注入那一刻的下一轮算第一轮。
+// local 的「第几轮」按绑定会话算；global 的 every 按每个会话自己的轮次算，
+// 第一次遇到该会话时算第 1 轮，times 是所有会话合计的总上限。
 //
 // 落盘只存路径和元信息，不存正文：存了正文，笔记后来改了也没意义。
 import fs from 'node:fs';
@@ -19,6 +24,19 @@ import { normalizeEvery, normalizeTimes, isDue } from './injection-schedule.mjs'
 const DEFAULT_FILE = path.join(os.homedir(), '.dsh-bridge', 'injections.json');
 // 单篇预算：注入进系统提示词、每轮都要重发，所以必须有上限。
 const DEFAULT_MAX_CHARS = 512 * 1024;
+const GLOBAL_SESSION = '*';
+
+function scopeOf(item) {
+  return item && item.scope === 'global' ? 'global' : 'local';
+}
+
+function titleKeyOf(item) {
+  const scope = scopeOf(item);
+  if (!item || !item.title) return null;
+  return scope === 'global'
+    ? 'g:' + item.title
+    : 'l:' + String(item.sessionId || '') + ':' + item.title;
+}
 
 export function createInjectionStore({
   ttlMs = 0,
@@ -26,13 +44,35 @@ export function createInjectionStore({
   maxCurrent = 10,
   file = null,
   maxContentChars = DEFAULT_MAX_CHARS,
+  ledger = null,
+  onError = null,
 } = {}) {
+  // 行为留痕：状态文件只说「现在有哪些」，说不了「哪一轮带了什么」。
+  // 留痕失败绝不能反过来打断注入。
+  function record(event) {
+    if (typeof ledger !== 'function') return;
+    try {
+      ledger(event);
+    } catch (error) {
+      // 注入本身比账本重要，但留痕失败不能变成「没人知道」
+      if (typeof onError !== 'function') return;
+      try {
+        onError(error);
+      } catch {
+        // 报告本身失败也只能放弃
+      }
+    }
+  }
   let seq = 0;
   let current = [];
   // 会话 -> 已经投递过几轮
   const rounds = new Map();
   // 这一轮该带哪些（beginDelivery 定下来，提示词段只读）
   let dueIds = new Set();
+  // 应用注入后要求「下一次投递忽略 every 带一次」的会话
+  const forced = new Set();
+  // 已经记过 render 的「会话@轮次」：提示词段可能被调多次，回执只记一次
+  const rendered = new Set();
   // id -> { mtimeMs, size, text }：文件没变就不重复读盘
   const cache = new Map();
 
@@ -40,11 +80,23 @@ export function createInjectionStore({
   const isAlive = (item) => !expiring || now() - item.at <= ttlMs;
   const roundOf = (sid) => Number(rounds.get(sid)) || 0;
 
+  function normalizeItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    const scope = scopeOf(item);
+    return {
+      ...item,
+      scope,
+      sessionId: scope === 'global' ? GLOBAL_SESSION : String(item.sessionId || ''),
+    };
+  }
+
   if (file) {
     try {
       const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (Array.isArray(saved.items)) {
-        current = saved.items.filter((x) => x && x.id && (typeof x.content === 'string' || typeof x.path === 'string'));
+        current = saved.items
+          .map(normalizeItem)
+          .filter((x) => x && x.id && (typeof x.content === 'string' || typeof x.path === 'string'));
       }
       if (Number.isFinite(saved.seq)) seq = Math.max(seq, Number(saved.seq));
       for (const item of current) {
@@ -81,7 +133,7 @@ export function createInjectionStore({
       const roundMap = {};
       for (const [sid, n] of rounds) roundMap[sid] = n;
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, JSON.stringify({ version: 3, seq, rounds: roundMap, items }), 'utf8');
+      fs.writeFileSync(file, JSON.stringify({ version: 4, seq, rounds: roundMap, items }), 'utf8');
     } catch {
       // 落盘失败不该让本次会话的注入失效
     }
@@ -126,6 +178,7 @@ export function createInjectionStore({
     const used = Number(item.used) || 0;
     return {
       ...item,
+      scope: scopeOf(item),
       every: normalizeEvery(item.every),
       times,
       used,
@@ -134,9 +187,19 @@ export function createInjectionStore({
     };
   };
 
+  function clearById(ids) {
+    if (!ids || ids.size === 0) return;
+    for (const item of current) {
+      if (ids.has(item.id)) cache.delete(item.id);
+    }
+    current = current.filter((item) => !ids.has(item.id));
+    persist();
+  }
+
   return {
     // 只产出一条记录；要不要生效由调用方 markCurrent 决定。
     add({
+      scope: rawScope = 'local',
       sessionId,
       content,
       path: notePath = null,
@@ -146,7 +209,8 @@ export function createInjectionStore({
       every = 1,
       times = 0,
     } = {}) {
-      const sid = String(sessionId || '').trim();
+      const scope = rawScope === 'global' ? 'global' : 'local';
+      const sid = scope === 'global' ? GLOBAL_SESSION : String(sessionId || '').trim();
       const rel = notePath ? String(notePath) : null;
       const abs = absPath ? String(absPath) : null;
       const text = typeof content === 'string' ? content : null;
@@ -156,6 +220,7 @@ export function createInjectionStore({
       seq += 1;
       const record = {
         id: 'inj-' + seq,
+        scope,
         sessionId: sid,
         title,
         kind,
@@ -163,9 +228,12 @@ export function createInjectionStore({
         every: normalizeEvery(every),
         times: normalizeTimes(times),
         used: 0,
-        // 注入那一刻的下一轮算第一轮：注入完马上那条消息就能带上
-        startRound: roundOf(sid) + 1,
+        // local：注入那一刻的下一轮算第一轮；global 的起点按会话在 beginDelivery 里记
+        startRound: scope === 'local' ? roundOf(sid) + 1 : 0,
       };
+      if (scope === 'global' && sessionId && String(sessionId).trim()) {
+        record.originSessionId = String(sessionId).trim();
+      }
       if (rel) {
         record.path = rel;
         if (abs) record.absPath = abs;
@@ -177,10 +245,11 @@ export function createInjectionStore({
       return record;
     },
 
-    /** 记为「当前注入」：可多篇，同标题覆盖，超出上限丢最旧。 */
+    /** 记为「当前注入」：可多篇，同范围同标题覆盖，超出上限丢最旧。 */
     markCurrent(record) {
       if (!record) return current.map(viewOf);
-      const idx = current.findIndex((x) => x.title && record.title && x.title === record.title);
+      const key = titleKeyOf(record);
+      const idx = key ? current.findIndex((x) => titleKeyOf(x) === key) : -1;
       if (idx >= 0) {
         cache.delete(current[idx].id);
         current[idx] = record;
@@ -194,25 +263,47 @@ export function createInjectionStore({
       return current.map(viewOf);
     },
 
-    /** 状态视图：带正文和剩余次数，不改任何计数（界面轮询调用它是对的）。 */
-    currentItems() {
-      return alive().map(viewOf);
+    /** 状态视图：带正文和剩余次数，不改任何计数（界面轮询调用它是对的）。
+     *  给 sessionId 时只返回「全局 + 该会话局部」；不给则返回全部。 */
+    currentItems(sessionId) {
+      const sid = String(sessionId || '').trim();
+      const list = alive();
+      const filtered = sid
+        ? list.filter((item) => scopeOf(item) === 'global' || item.sessionId === sid)
+        : list;
+      return filtered.map(viewOf);
     },
 
     /**
      * 组装系统提示词时调：只返回这一轮定下来的那几篇。
      * 纯读——计数已经在 beginDelivery 里做过了，这里被调几次都不影响。
      */
-    carryItems() {
+    carryItems(sessionId) {
       if (dueIds.size === 0) return [];
-      return alive()
-        .filter((item) => dueIds.has(item.id))
+      const sid = String(sessionId || '').trim();
+      const list = alive()
+        .filter((item) => dueIds.has(item.id) && (!sid || scopeOf(item) === 'global' || item.sessionId === sid))
         .map(viewOf);
+      // 只有真被取走才算渲染：定了名单但提示词段没来取，不能记成「带了」。
+      if (list.length > 0) {
+        const round = roundOf(sid);
+        const key = sid + '@' + round;
+        if (!rendered.has(key)) {
+          rendered.add(key);
+          record({
+            type: 'render',
+            sessionId: sid,
+            round,
+            items: list.map((x) => ({ id: x.id, title: x.title || null, every: x.every, times: x.times, used: x.used })),
+          });
+        }
+      }
+      return list;
     },
 
     /**
      * 一条消息要投递了：这个会话的轮次 +1，顺手定下这一轮该带哪几篇。
-     * 只有这一轮到点的会被标记，并把「用过」记一次。
+     * global 项按当前会话的轮次节流，used 全局累计；local 项只看绑定会话。
      */
     beginDelivery(sessionId) {
       const sid = String(sessionId || '').trim();
@@ -220,21 +311,48 @@ export function createInjectionStore({
       const next = roundOf(sid) + 1;
       rounds.set(sid, next);
       dueIds = new Set();
+      const forcedNow = forced.delete(sid);
       for (const item of alive()) {
-        if (item.sessionId !== sid) continue;
-        const due = isDue({
-          every: item.every,
-          times: item.times,
-          used: Number(item.used) || 0,
-          startRound: Number(item.startRound) || 0,
-          round: next,
-        });
+        const scope = scopeOf(item);
+        if (scope === 'local' && item.sessionId !== sid) continue;
+        let startRound;
+        if (scope === 'global') {
+          if (!item.starts || typeof item.starts !== 'object') item.starts = {};
+          startRound = Number(item.starts[sid]);
+          if (!Number.isFinite(startRound) || startRound <= 0) {
+            startRound = next;
+            item.starts[sid] = startRound;
+          }
+        } else {
+          startRound = Number(item.startRound) || 0;
+        }
+        const times = normalizeTimes(item.times);
+        const used = Number(item.used) || 0;
+        // forceNext：应用注入后这一轮不看 every，但仍尊重总次数上限。
+        const due = forcedNow
+          ? times === 0 || used < times
+          : isDue({ every: item.every, times, used, startRound, round: next });
         if (!due) continue;
         item.used = (Number(item.used) || 0) + 1;
         item.lastRound = next;
+        item.lastSession = sid;
         dueIds.add(item.id);
       }
       persist();
+      if (dueIds.size > 0) {
+        const items = [];
+        for (const item of current) {
+          if (!dueIds.has(item.id)) continue;
+          items.push({
+            id: item.id,
+            title: item.title || null,
+            every: normalizeEvery(item.every),
+            times: normalizeTimes(item.times),
+            used: Number(item.used) || 0,
+          });
+        }
+        record({ type: 'due', sessionId: sid, round: next, items });
+      }
       return next;
     },
 
@@ -246,14 +364,19 @@ export function createInjectionStore({
       if (round <= 0) return 0;
       rounds.set(sid, round - 1);
       // 这一轮已经记过的「用过」和名单都退回
+      const undone = [];
       for (const item of current) {
-        if (Number(item.lastRound) === round) {
-          item.used = Math.max(0, (Number(item.used) || 0) - 1);
-          delete item.lastRound;
-        }
+        if (Number(item.lastRound) !== round) continue;
+        if (scopeOf(item) === 'local' ? item.sessionId !== sid : item.lastSession !== sid) continue;
+        item.used = Math.max(0, (Number(item.used) || 0) - 1);
+        delete item.lastRound;
+        delete item.lastSession;
+        undone.push({ id: item.id, title: item.title || null });
       }
       dueIds = new Set();
       persist();
+      rendered.delete(sid + '@' + round);
+      if (undone.length > 0) record({ type: 'rollback', sessionId: sid, round, items: undone });
       return round - 1;
     },
 
@@ -263,11 +386,12 @@ export function createInjectionStore({
       const kept = [];
       let changed = false;
       for (const item of current) {
-        const times = normalizeTimes(item.times);
-        if (sid && item.sessionId !== sid) {
+        const scope = scopeOf(item);
+        if (scope === 'local' && sid && item.sessionId !== sid) {
           kept.push(item);
           continue;
         }
+        const times = normalizeTimes(item.times);
         if (times > 0 && (Number(item.used) || 0) >= times) {
           cache.delete(item.id);
           changed = true;
@@ -282,15 +406,41 @@ export function createInjectionStore({
       return current.map(viewOf);
     },
 
-    clearCurrent(id) {
-      if (id) {
-        const kept = current.filter((x) => x.id !== id);
-        for (const x of current) if (x.id === id) cache.delete(x.id);
-        current = kept;
-      } else {
-        current = [];
-        cache.clear();
+    /** 下一次该会话投递时忽略 every 带一次（应用注入后立刻生效）。 */
+    forceNext(sessionId) {
+      const sid = String(sessionId || '').trim();
+      if (sid) forced.add(sid);
+    },
+
+    /** 清掉按 mtime/size 缓存的正文，下一次重新读磁盘。 */
+    refreshCache() {
+      cache.clear();
+    },
+
+    /** 清注入：传 id 清单篇；传 { scope:'global' } 清全局；传 { scope:'local', sessionId } 清该会话局部。 */
+    clearCurrent(arg) {
+      if (arg && typeof arg === 'object') {
+        const { id, scope, sessionId } = arg;
+        if (id) {
+          clearById(new Set([String(id)]));
+          return;
+        }
+        const sid = String(sessionId || '').trim();
+        const ids = new Set();
+        for (const item of current) {
+          if (scope === 'global' && scopeOf(item) === 'global') ids.add(item.id);
+          else if (scope === 'local' && scopeOf(item) === 'local' && (!sid || item.sessionId === sid)) ids.add(item.id);
+          else if (!scope) ids.add(item.id);
+        }
+        clearById(ids);
+        return;
       }
+      if (typeof arg === 'string' && arg) {
+        clearById(new Set([arg]));
+        return;
+      }
+      current = [];
+      cache.clear();
       persist();
     },
   };

@@ -8,11 +8,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { startConnector } from './core/server.mjs';
 import { renderInjection } from './core/injection.mjs';
+import { createLedger } from './core/injection-ledger.mjs';
 import { createStateStore } from './core/state.mjs';
 import { createTranscriptStore } from './core/transcript-store.mjs';
 import { createTranscriptService } from './core/transcript-service.mjs';
 
 const INJECTION_FILE = path.join(os.homedir(), '.dsh-bridge', 'injections.json');
+// 事件流（谁在哪一轮带了什么），和 injections.json 的快照分工不同
+const INJECTION_LEDGER_FILE = path.join(os.homedir(), '.dsh-bridge', 'injection-ledger.jsonl');
 
 export const name = 'bridge-connector';
 export const inject = ['sessionController'];
@@ -56,6 +59,10 @@ export async function apply(ctx, config = {}) {
   const token = config.token || loadToken();
   // 注入开关的真相顺序：上次运行时的状态 → 配置默认。
   // 只读配置的话，用户在面板上开的开关会在 DSH 重启后悄悄回落成配置值。
+  // 注入行为留痕：每轮真的带进去什么，都能回查
+  const ledgerFail = (err) =>
+    ctx.logger?.warn?.('[bridge-connector] 注入账本写入失败：' + String((err && err.message) || err));
+  const injectionLedger = createLedger({ file: INJECTION_LEDGER_FILE, onError: ledgerFail });
   const stateStore = createStateStore();
   const savedState = stateStore.load();
   let injectionOn = savedState.injection === null ? config.injection === true : savedState.injection;
@@ -95,6 +102,8 @@ export async function apply(ctx, config = {}) {
         clientTimeZone: localTimeZone(),
         injectionTtlMs: Number(config.injectionTtlMs) || undefined,
         injectionFile: INJECTION_FILE,
+        injectionLedger,
+        injectionOnError: ledgerFail,
         injectionState,
         transcriptStore,
         onVaultRoot: () => transcriptService.backfillRecent(),
@@ -119,10 +128,16 @@ export async function apply(ctx, config = {}) {
           promptCtx.systemPrompt.section({
             name: 'bridge:context',
             order: 250,
-            text: () => {
+            text: (context) => {
               if (injectionState.on !== true) return '';
-              // carryItems 会按「每 N 轮 / 共 M 次」挑出这一轮该带的，并记一次用量
-              const items = server.injections.carryItems();
+              // 系统提示词按会话组装；assembleContext 的 scope 是 Agent，id 就是 session id。
+              const sid = String(
+                context?.agent?.id ||
+                context?.scope?.id ||
+                (typeof context?.scope === 'string' ? context.scope : '') ||
+                '',
+              );
+              const items = server.injections.carryItems(sid);
               return items.length ? renderInjection(items) : '';
             },
           });
@@ -137,6 +152,15 @@ export async function apply(ctx, config = {}) {
   }
 
   ctx.on('session/event', (session, event) => {
+    // 轮次在这里推进：DSH 先 append turn/start，再组装系统提示词，
+    // 所以这一刻定下的注入名单能被这一轮直接带上。Web / QQ 会话也走这里。
+    try {
+      const sid = String(session?.id || '');
+      if (sid && event?.type === 'turn/start') server.injections.beginDelivery(sid);
+      else if (sid && event?.type === 'turn/end') server.injections.tick(sid);
+    } catch {
+      /* 注入计数失败绝不打断会话 */
+    }
     try {
       server.broadcast(session?.id, event);
     } catch {

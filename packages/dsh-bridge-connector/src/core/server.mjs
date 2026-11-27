@@ -158,6 +158,8 @@ export function startConnector(options) {
     injections = null,
     injectionTtlMs = 0,
     injectionFile = null,
+    injectionLedger = null,
+    injectionOnError = null,
     workspaceRegistry = null,
     injectionState = { on: false },
     obsidianProbe = null,
@@ -170,7 +172,33 @@ export function startConnector(options) {
   // 投递前现查 Obsidian 的光标：本地回环一次几毫秒，比等推送精确。
   const probe = obsidianProbe || createObsidianProbe();
 
-  const injectionStore = injections || createInjectionStore({ ttlMs: injectionTtlMs, file: injectionFile });
+  // 账本可以是现成对象（带 append），也可以直接给 append 函数；
+  // 注入模块只认函数，这里统一换算，别让对象混进去被静默跳过。
+  const ledgerAppend =
+    typeof injectionLedger === 'function'
+      ? injectionLedger
+      : injectionLedger && typeof injectionLedger.append === 'function'
+        ? injectionLedger.append.bind(injectionLedger)
+        : null;
+  const injectionStore =
+    injections ||
+    createInjectionStore({
+      ttlMs: injectionTtlMs,
+      file: injectionFile,
+      ledger: ledgerAppend,
+      onError: injectionOnError,
+    });
+
+  // 操作留痕：谁加了什么、清了什么、刷新了哪个会话。
+  // 只在真正成功之后记，失败请求不该在账本里冒充一次操作。
+  const ledgerNote = (event) => {
+    if (!injectionLedger || typeof injectionLedger.append !== 'function') return;
+    try {
+      injectionLedger.append(event);
+    } catch {
+      // 账本写不进去不影响这次请求
+    }
+  };
 
   // 当前打开的笔记：Obsidian 侧在切标签、改正文时推上来，
   // 目的是让 agent 不用等主人开口就知道「屏幕上这篇」是什么。
@@ -503,7 +531,8 @@ export function startConnector(options) {
     }
 
     if (req.method === 'GET' && path === '/inject') {
-      const items = injectionStore.currentItems();
+      const sessionId = String(url.searchParams.get('sessionId') || '').trim();
+      const items = injectionStore.currentItems(sessionId || undefined);
       json(res, 200, {
         ok: true,
         data: {
@@ -511,9 +540,13 @@ export function startConnector(options) {
           count: items.length,
           current: items.map((cur) => ({
             id: cur.id,
+            scope: cur.scope || 'local',
+            sessionId: cur.sessionId || null,
             title: cur.title || null,
             at: new Date(cur.at).toISOString(),
             length: cur.content.length,
+            path: cur.path || null,
+            absPath: cur.absPath || null,
             // 节奏：每 every 轮带一次，共 times 次（0 = 不限期），已带 used 次
             every: Number(cur.every) || 1,
             times: Number(cur.times) || 0,
@@ -525,12 +558,62 @@ export function startConnector(options) {
       return;
     }
 
+    // 注入事件流：哪一轮、哪个会话、真带进去了哪几篇。
+    // 和 GET /inject 的分工：那个是「现在有什么」，这个是「过去发生过什么」。
+    if (req.method === 'GET' && path === '/inject/ledger') {
+      const raw = Number(url.searchParams.get('limit'));
+      const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), 2000) : 50;
+      const events =
+        injectionLedger && typeof injectionLedger.read === 'function' ? injectionLedger.read(limit) : [];
+      json(res, 200, { ok: true, data: { count: events.length, limit, events } });
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/inject/refresh') {
+      const payload = await readJsonBody(req, res);
+      if (!payload) return;
+      if (injectionState.on !== true) {
+        json(res, 409, { ok: false, error: { code: 'injection-disabled', message: '注入未启用：连接器配置 injection: true 后才可用' } });
+        return;
+      }
+      const sessionId = String(payload.sessionId || '').trim();
+      if (!sessionId) {
+        json(res, 400, { ok: false, error: { code: 'bad-args', message: '缺少 sessionId' } });
+        return;
+      }
+      // 应用注入后：清掉按 mtime/size 缓存的正文，并让下一次投递忽略 every 带一次。
+      injectionStore.refreshCache();
+      injectionStore.forceNext(sessionId);
+      ledgerNote({ type: 'refresh', sessionId });
+      json(res, 200, { ok: true, data: { refreshed: true, sessionId } });
+      return;
+    }
+
     if (req.method === 'POST' && path === '/inject/clear') {
       // 坏 JSON 不许当成「清空全部」：以前这里静默吞掉解析错误，一次手抖就清光注入。
       const payload = await readJsonBody(req, res);
       if (!payload) return;
-      injectionStore.clearCurrent(payload && payload.id ? String(payload.id) : null);
-      json(res, 200, { ok: true, data: { cleared: true, remaining: injectionStore.currentItems().length } });
+      if (payload.id) injectionStore.clearCurrent(String(payload.id));
+      else if (payload.scope) {
+        injectionStore.clearCurrent({
+          scope: String(payload.scope),
+          sessionId: payload.sessionId ? String(payload.sessionId) : '',
+        });
+      } else injectionStore.clearCurrent();
+      const sessionId = String(payload.sessionId || '').trim();
+      ledgerNote({
+        type: 'clear',
+        itemId: payload.id ? String(payload.id) : null,
+        scope: payload.scope ? String(payload.scope) : null,
+        sessionId: sessionId || null,
+      });
+      json(res, 200, {
+        ok: true,
+        data: {
+          cleared: true,
+          remaining: injectionStore.currentItems(sessionId || undefined).length,
+        },
+      });
       return;
     }
 
@@ -555,22 +638,20 @@ export function startConnector(options) {
         return;
       }
       try {
+        const scope = payload.scope === 'global' ? 'global' : 'local';
         let sessionId = String(payload.sessionId || '').trim();
-        if (!sessionId) {
+        if (scope === 'local' && !sessionId) {
           const value = await sessions.list({}, new AbortController().signal);
           const items = Array.isArray(value?.items) ? value.items : [];
           const recent = pickRecent(items);
-          if (!recent) {
-            json(res, 409, { ok: false, error: { code: 'no-session', message: '没有可注入的会话' } });
-            return;
-          }
-          if (!recent.sessionId) {
+          if (!recent || !recent.sessionId) {
             json(res, 409, { ok: false, error: { code: 'no-session', message: '没有可注入的会话' } });
             return;
           }
           sessionId = String(recent.sessionId).trim();
         }
         const record = injectionStore.add({
+          scope,
           sessionId,
           content,
           path: notePath,
@@ -586,9 +667,25 @@ export function startConnector(options) {
           return;
         }
         injectionStore.markCurrent(record);
+        ledgerNote({
+          type: 'add',
+          itemId: record.id,
+          scope: record.scope,
+          sessionId: record.sessionId || null,
+          title: record.title || null,
+          path: record.path || null,
+          every: record.every,
+          times: record.times,
+        });
         json(res, 200, {
           ok: true,
-          data: { queued: true, id: record.id, sessionId, count: injectionStore.currentItems().length },
+          data: {
+            queued: true,
+            id: record.id,
+            scope: record.scope,
+            sessionId: record.sessionId,
+            count: injectionStore.currentItems(scope === 'local' ? sessionId : undefined).length,
+          },
         });
       } catch (err) {
         json(res, 500, { ok: false, error: { code: 'inject-failed', message: String(err?.message || err) } });
@@ -639,26 +736,18 @@ export function startConnector(options) {
           }
         }
         const text = noteText ? noteText + '\n\n' + markSource(message) : markSource(message);
-        // 这一轮算第几轮：注入的「每 N 轮」靠它数。要在 prompt 之前加，
-        // 因为系统提示词是在 prompt 里组装的。
-        injectionStore.beginDelivery(sessionId);
-        try {
-          await sessions.prompt(
-            {
-              requestId,
-              sessionId,
-              mode: payload.mode === 'steer' ? 'steer' : 'queue',
-              content: [{ type: 'text', text }],
-              ...(clientTimeZone ? { clientTimeZone } : {}),
-            },
-            new AbortController().signal,
-          );
-        } catch (promptError) {
-          // 没投出去：这一轮退回去，别让「每 N 轮」白走一格、也别白吃一次次数
-          injectionStore.rollbackDelivery(sessionId);
-          throw promptError;
-        }
-        injectionStore.tick(sessionId);
+        // 轮次由 DSH 的 turn/start 事件推进（见 index.js）：这样 Web / QQ 会话
+        // 也走同一套注入节奏，不只是从 Obsidian 面板发的消息。
+        await sessions.prompt(
+          {
+            requestId,
+            sessionId,
+            mode: payload.mode === 'steer' ? 'steer' : 'queue',
+            content: [{ type: 'text', text }],
+            ...(clientTimeZone ? { clientTimeZone } : {}),
+          },
+          new AbortController().signal,
+        );
         json(res, 200, { ok: true, data: { sessionId, delivered: true, requestId } });
       } catch (err) {
         json(res, 500, { ok: false, error: { code: 'prompt-failed', message: String(err?.message || err) } });
@@ -755,6 +844,7 @@ export function startConnector(options) {
         url: `http://${host}:${actualPort}`,
         broadcast,
         injections: injectionStore,
+        injectionLedger,
         injectionState,
         activeNote: activeNoteOf,
         close: () =>
